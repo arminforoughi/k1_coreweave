@@ -37,8 +37,11 @@ from perception.tracker import SimpleTracker
 load_dotenv()
 config = load_config()
 
-# Init Weave
-weave.init(config.weave.project)
+# Init Weave (graceful if no W&B credentials)
+try:
+    weave.init(config.weave.project)
+except (ValueError, Exception) as e:
+    print(f"Weave init skipped ({e}) — set WANDB_API_KEY + WANDB_ENTITY to enable tracing")
 
 # Init Redis
 r = redis.from_url(config.redis.url, decode_responses=True)
@@ -86,8 +89,15 @@ def knn_lookup_op(vector: np.ndarray) -> list[dict]:
 
 
 @weave.op()
-def gate_decision_op(matches: list[dict], yolo_class: str, yolo_confidence: float) -> dict:
-    """Decide known/uncertain/unknown using KNN + YOLO confidence."""
+def gate_decision_op(
+    matches: list[dict],
+    yolo_class: str,
+    yolo_confidence: float,
+    depth_value: float = None,
+    crop_quality: float = None,
+    prefilter_action: str = None,
+) -> dict:
+    """Decide known/uncertain/unknown using KNN + YOLO + depth signals."""
     state, label, similarity = gating.decide(matches)
 
     # If KNN has no opinion but YOLO is very confident, trust YOLO
@@ -96,12 +106,30 @@ def gate_decision_op(matches: list[dict], yolo_class: str, yolo_confidence: floa
         label = yolo_class
         similarity = yolo_confidence
 
+    # Priority learning target: Jetson flagged this as low-confidence but
+    # high-quality capture — promote to uncertain so the learning flow
+    # engages sooner (research/teach).
+    if prefilter_action == "priority" and state == "unknown":
+        state = "uncertain"
+        label = yolo_class
+
+    # Depth-based confidence adjustments (only when depth is available)
+    if depth_value is not None:
+        # Close object + borderline uncertain → trust KNN more (good crop)
+        if depth_value > 0.5 and state == "uncertain" and similarity >= 0.6:
+            state = "known"
+        # Far object + borderline known → trust KNN less (poor crop quality)
+        if depth_value < 0.15 and state == "known" and similarity < 0.8:
+            state = "uncertain"
+
     return {
         "state": state,
         "label": label,
         "similarity": similarity,
         "yolo_class": yolo_class,
         "yolo_confidence": yolo_confidence,
+        "depth_value": depth_value,
+        "crop_quality": crop_quality,
     }
 
 
@@ -118,6 +146,9 @@ class Detection(BaseModel):
     yolo_class: str
     yolo_confidence: float
     crop_b64: str
+    depth_value: Optional[float] = None
+    crop_quality: Optional[float] = None
+    prefilter_action: Optional[str] = None
 
 
 class IngestRequest(BaseModel):
@@ -205,8 +236,13 @@ def ingest_frame(req: IngestRequest):
         # KNN lookup
         matches = knn_lookup_op(matched_track.embedding)
 
-        # Gate decision (combines KNN similarity + YOLO confidence)
-        decision = gate_decision_op(matches, det.yolo_class, det.yolo_confidence)
+        # Gate decision (combines KNN similarity + YOLO confidence + depth)
+        decision = gate_decision_op(
+            matches, det.yolo_class, det.yolo_confidence,
+            depth_value=det.depth_value,
+            crop_quality=det.crop_quality,
+            prefilter_action=det.prefilter_action,
+        )
         state = decision["state"]
         label = decision["label"]
         similarity = decision["similarity"]
@@ -224,6 +260,8 @@ def ingest_frame(req: IngestRequest):
             similarity=similarity,
             thumbnail_b64=det.crop_b64,
             embedding=matched_track.embedding.tolist() if state != "known" else None,
+            depth_value=det.depth_value,
+            crop_quality=det.crop_quality,
         )
         r.xadd(STREAM_VISION_OBJECTS, event.to_redis(), maxlen=1000)
 
@@ -241,6 +279,8 @@ def ingest_frame(req: IngestRequest):
                     thumbnail_b64=det.crop_b64,
                     embedding=matched_track.embedding.tolist(),
                     top_similarity=similarity,
+                    depth_value=det.depth_value,
+                    crop_quality=det.crop_quality,
                 )
                 r.xadd(STREAM_VISION_UNKNOWN, unknown_event.to_redis(), maxlen=500)
                 r.incr(METRICS_UNKNOWN_COUNT)
@@ -252,6 +292,8 @@ def ingest_frame(req: IngestRequest):
             "similarity": round(similarity, 4),
             "yolo_class": det.yolo_class,
             "yolo_confidence": det.yolo_confidence,
+            "depth_value": det.depth_value,
+            "crop_quality": det.crop_quality,
         })
 
     return {"objects": results, "track_count": len(tracks)}

@@ -4,8 +4,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import redis
-from redis.commands.search.field import VectorField, TagField, TextField, NumericField
-from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 from shared.config import load_config
 from shared.redis_keys import (
     VECTOR_INDEX_NAME,
@@ -25,29 +23,22 @@ EMBEDDING_DIM = 1280  # MobileNetV2 feature dim
 def setup_vector_index(r: redis.Redis):
     """Create RediSearch vector index for embeddings."""
     try:
-        r.ft(VECTOR_INDEX_NAME).dropindex(delete_documents=False)
+        r.execute_command("FT.DROPINDEX", VECTOR_INDEX_NAME)
         print(f"Dropped existing index: {VECTOR_INDEX_NAME}")
     except Exception:
         pass
 
-    schema = (
-        TagField("$.label_id", as_name="label_id"),
-        TextField("$.label_name", as_name="label_name"),
-        NumericField("$.created_at", as_name="created_at"),
-        VectorField(
-            "$.vector",
-            "FLAT",
-            {
-                "TYPE": "FLOAT32",
-                "DIM": EMBEDDING_DIM,
-                "DISTANCE_METRIC": "COSINE",
-            },
-            as_name="vector",
-        ),
+    r.execute_command(
+        "FT.CREATE", VECTOR_INDEX_NAME,
+        "ON", "JSON",
+        "PREFIX", "1", "emb:",
+        "SCHEMA",
+        "$.label_id", "AS", "label_id", "TAG",
+        "$.label_name", "AS", "label_name", "TEXT",
+        "$.created_at", "AS", "created_at", "NUMERIC",
+        "$.vector", "AS", "vector", "VECTOR", "FLAT", "6",
+        "TYPE", "FLOAT32", "DIM", str(EMBEDDING_DIM), "DISTANCE_METRIC", "COSINE",
     )
-
-    definition = IndexDefinition(prefix=["emb:"], index_type=IndexType.JSON)
-    r.ft(VECTOR_INDEX_NAME).create_index(fields=schema, definition=definition)
     print(f"Created vector index: {VECTOR_INDEX_NAME} (dim={EMBEDDING_DIM})")
 
 

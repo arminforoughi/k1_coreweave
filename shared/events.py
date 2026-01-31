@@ -16,6 +16,8 @@ class ObjectEvent:
     similarity: float = 0.0
     thumbnail_b64: str = ""
     embedding: Optional[list] = None
+    depth_value: Optional[float] = None
+    crop_quality: Optional[float] = None
     timestamp: float = field(default_factory=time.time)
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
@@ -35,6 +37,10 @@ class ObjectEvent:
         data["embedding"] = json.loads(emb) if emb else None
         data["similarity"] = float(data.get("similarity", 0))
         data["timestamp"] = float(data.get("timestamp", 0))
+        dv = data.get("depth_value", "")
+        data["depth_value"] = float(dv) if dv else None
+        cq = data.get("crop_quality", "")
+        data["crop_quality"] = float(cq) if cq else None
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
@@ -45,6 +51,8 @@ class UnknownEvent:
     thumbnail_b64: str = ""
     embedding: Optional[list] = None
     top_similarity: float = 0.0
+    depth_value: Optional[float] = None
+    crop_quality: Optional[float] = None
     timestamp: float = field(default_factory=time.time)
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
@@ -62,6 +70,10 @@ class UnknownEvent:
         data["embedding"] = json.loads(emb) if emb else None
         data["top_similarity"] = float(data.get("top_similarity", 0))
         data["timestamp"] = float(data.get("timestamp", 0))
+        dv = data.get("depth_value", "")
+        data["depth_value"] = float(dv) if dv else None
+        cq = data.get("crop_quality", "")
+        data["crop_quality"] = float(cq) if cq else None
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 

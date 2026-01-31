@@ -1,4 +1,4 @@
-.PHONY: setup redis-setup backend dashboard jetson-client all clean
+.PHONY: setup redis-setup backend dashboard jetson-client jetson-ros all clean
 
 # ===== LAPTOP (runs everything except camera) =====
 
@@ -29,6 +29,11 @@ redis:
 jetson-client:
 	python perception/jetson_client.py --backend $(BACKEND)
 
+# Run the Jetson client with ROS 2 camera topic + MiDaS depth
+# Usage: make jetson-ros BACKEND=http://<laptop-ip>:8000
+jetson-ros:
+	python perception/jetson_client.py --backend $(BACKEND) --ros
+
 # Install Jetson-only dependencies
 jetson-setup:
 	pip install -r perception/requirements-jetson.txt
@@ -47,7 +52,8 @@ all:
 	@echo ""
 	@echo "ON THE JETSON:"
 	@echo "  make jetson-setup                                    # Install deps (once)"
-	@echo "  make jetson-client BACKEND=http://<laptop-ip>:8000   # Start camera"
+	@echo "  make jetson-ros BACKEND=http://<laptop-ip>:8000      # ROS 2 + depth (primary)"
+	@echo "  make jetson-client BACKEND=http://<laptop-ip>:8000   # Fallback (no ROS 2)"
 
 # Clean up
 clean:

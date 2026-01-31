@@ -1,5 +1,9 @@
 # Minimal dependencies for the Jetson client only
-# The Jetson does: camera capture + YOLO detection + POST crops to backend
+# The Jetson does: camera capture + YOLO detection + MiDaS depth + POST crops to backend
 ultralytics>=8.0.0
 opencv-python-headless>=4.8.0
 requests>=2.28.0
+timm>=0.9.0
+python-dotenv>=1.0.0
+# Note: torch, rclpy, cv_bridge, sensor_msgs come from JetPack / ROS 2 apt packages
+# Install ROS 2 deps via: sudo apt install ros-humble-cv-bridge python3-sensor-msgs
