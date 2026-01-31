@@ -1,13 +1,14 @@
 # Booster Camera AI Detection System
 
-AI-enhanced camera feed viewer and object detection system for the Booster Camera Bridge with low-confidence detection extraction capabilities.
+AI-enhanced camera feed viewer and object detection system for the Booster Camera Bridge with low-confidence detection extraction capabilities and autonomous person following for K1 robots.
 
 ## Overview
 
-This repository contains two main Python scripts for real-time camera feed processing using YOLO object detection and neural network-based depth estimation:
+This repository contains three main Python scripts for real-time camera feed processing using YOLO object detection and neural network-based depth estimation:
 
 1. **camera_feed_detection.py** - Web-based AI detection viewer with depth estimation
 2. **extract_low_confidence_objects.py** - Extract and save objects with low confidence scores
+3. **k1_follow_person.py** - Autonomous person following system for K1 robots with YOLO and MiDaS depth
 
 ## Features
 
@@ -33,12 +34,36 @@ This repository contains two main Python scripts for real-time camera feed proce
 - **Detailed Logging** - Timestamps and confidence scores for all detections
 - **Organized Output** - Structured directory layout for easy review
 
+### K1 Person Following System (`k1_follow_person.py`)
+
+- **Autonomous Person Following** with real-time tracking and locomotion control
+- **YOLO Object Detection** for person identification
+- **MiDaS Depth Estimation** for distance calculation and obstacle avoidance
+- **Head Tracking** - Robot head follows detected person even when not moving
+- **Smart Target Selection** - Lock onto specific person or auto-select closest to center
+- **Safety Features**:
+  - Obstacle detection and avoidance
+  - Configurable following distance (1-2 meters default)
+  - Emergency stop capability
+- **Web Interface** - Browser-based control and live video feed
+- **Multiple Control Modes**:
+  - Auto-follow mode (autonomous following)
+  - Head-only tracking mode (no locomotion)
+  - Manual person selection (lock onto specific person)
+
 ## Requirements
 
 ### Dependencies
 
+**For camera_feed_detection.py and extract_low_confidence_objects.py:**
 ```bash
 pip install rclpy sensor_msgs cv_bridge opencv-python numpy ultralytics torch torchvision transformers pillow
+```
+
+**For k1_follow_person.py (additional requirements):**
+```bash
+pip install booster-robotics-sdk-python
+# MiDaS models are loaded automatically via torch.hub
 ```
 
 ### System Requirements
@@ -126,6 +151,58 @@ python3 extract_low_confidence_objects.py \
 - `--model` - YOLO model to use (default: yolov8n.pt)
 - `--output` - Output directory path (default: low_confidence_detections)
 
+### K1 Person Following System
+
+**Basic usage with web interface:**
+```bash
+python3 k1_follow_person.py 127.0.0.1 --yolo yolov8n.pt --depth small --web --port 8080 --auto-follow
+```
+
+**Headless mode (no web interface):**
+```bash
+python3 k1_follow_person.py eth0 --yolo yolov8n.pt --depth small
+```
+
+**With depth visualization:**
+```bash
+python3 k1_follow_person.py 127.0.0.1 --yolo yolov8n.pt --depth small --show-depth --web --port 8080
+```
+
+**Custom depth model and confidence:**
+```bash
+python3 k1_follow_person.py 127.0.0.1 \
+    --yolo yolov8s.pt \
+    --depth hybrid \
+    --confidence 0.6 \
+    --web \
+    --port 8080 \
+    --auto-follow
+```
+
+**Available Arguments:**
+- `network_interface` - Network interface for robot connection (e.g., `127.0.0.1`, `eth0`) **[REQUIRED]**
+- `--yolo` - YOLO model path (default: yolov8n.pt)
+- `--depth` - Depth model size: small, hybrid, large (default: small)
+  - `small` - MiDaS_small (fastest, ~10 FPS)
+  - `hybrid` - DPT_Hybrid (balanced)
+  - `large` - DPT_Large (most accurate)
+- `--show-depth` - Show depth visualization side-by-side
+- `--confidence` - Detection confidence threshold (default: 0.5)
+- `--web` - Start web server for viewing and control
+- `--port` - Web server port (default: 8080)
+- `--auto-follow` - Enable follow mode automatically on startup
+
+**Web Interface Controls:**
+- Open browser to `http://<robot-ip>:8080`
+- **Toggle Follow Mode** - Enable/disable autonomous following
+- **Emergency Stop** - Immediately stop all movement
+- **Auto Select** - Automatically follow person closest to center
+- **Person #N buttons** - Lock onto specific person when multiple people detected
+
+**Keyboard Controls (Headless Mode):**
+- Press **ENTER** to toggle follow mode
+- Press **Ctrl+C** to exit
+
 ## Output Structure
 
 ### Low-Confidence Detection Output
@@ -182,6 +259,67 @@ Download models from: https://github.com/ultralytics/ultralytics
 - Optimized for stereo pairs
 - Currently falls back to MiDaS
 
+## K1 Person Following - How It Works
+
+### Behavior Modes
+
+**Head Tracking Mode (Default):**
+- Robot head continuously tracks detected person
+- No locomotion/movement
+- Safe for testing and observation
+
+**Follow Mode (Enabled with --auto-follow or Toggle button):**
+- Full autonomous following with locomotion
+- Maintains 1-2 meter following distance
+- Obstacle avoidance active
+- Robot rotates to keep person centered
+
+### Following Distance Configuration
+
+The system uses normalized MiDaS depth values (0=far, 1=close):
+
+```python
+target_depth_min = 0.2   # Move forward if person farther than ~2m
+target_depth_max = 0.82  # Back up if person closer than ~1m
+```
+
+**Optimal following distance:** 1-2 meters
+
+### Person Selection
+
+**Auto-Select Mode (Default):**
+- Follows person closest to camera center
+- Automatically switches if another person moves to center
+
+**Locked Mode:**
+- Click "Person #N" button in web interface
+- Robot stays locked to that specific person
+- Uses position tracking to maintain lock even with occlusion
+- Click "Auto Select" to return to auto mode
+
+### Safety Features
+
+1. **Obstacle Detection:** Stops forward movement if obstacles detected
+2. **Dead Zone:** 10% center tolerance to prevent jittery movements
+3. **Speed Limits:**
+   - Forward: 0.3 m/s
+   - Backward: 0.15 m/s
+   - Rotation: 0.4 rad/s
+4. **Emergency Stop:** Immediately halts all movement via web interface
+
+### Movement Logic
+
+```
+If person detected:
+  1. Calculate horizontal offset from center
+  2. Rotate to keep person centered (if offset > 15%)
+  3. If follow mode enabled:
+     - Move forward if depth < 0.2 (too far)
+     - Move backward if depth > 0.82 (too close)
+     - Check obstacles before moving forward
+     - Reduce speed if not well-centered
+```
+
 ## Use Cases
 
 ### Camera Feed Detection
@@ -196,6 +334,14 @@ Download models from: https://github.com/ultralytics/ultralytics
 - Edge case identification
 - Training data augmentation
 - False positive detection
+
+### K1 Person Following
+- Autonomous tour guide robots
+- Security patrol and monitoring
+- Elderly care and assistance
+- Warehouse and delivery robots
+- Interactive demonstrations
+- Human-robot interaction research
 
 ## Performance Tips
 
@@ -217,6 +363,40 @@ Download models from: https://github.com/ultralytics/ultralytics
 - Use a smaller YOLO model
 - Reduce camera resolution
 - Use MiDaS instead of DPT-BEiT for depth
+
+**K1 Person Following Issues:**
+
+*Robot not connecting:*
+- Check network interface name: `ip addr` or `ifconfig`
+- Verify robot is on same network
+- Try `127.0.0.1` for local testing or `eth0`/`wlan0` for network interface
+
+*Robot not moving in follow mode:*
+- Ensure robot is in walking mode (script sets this automatically)
+- Check if follow mode is actually enabled (green "FOLLOW MODE: ON" in feed)
+- Verify person is detected (green bounding box should appear)
+- Check depth values are being calculated (should show "D:0.XX" in label)
+
+*Following distance is wrong:*
+- Adjust `target_depth_min` and `target_depth_max` in script
+- MiDaS depth: higher values = closer, lower values = farther
+- Default: 0.2-0.82 range for 1-2 meter following distance
+
+*Robot loses tracking:*
+- Use "Lock Person" feature to maintain specific person
+- Ensure good lighting for detection
+- Increase `--confidence` threshold if too many false detections
+- Decrease `--confidence` if person not being detected
+
+*Web interface not accessible:*
+- Check firewall settings
+- Verify port is not in use: `netstat -tulpn | grep 8080`
+- Try different port: `--port 8081`
+
+*MiDaS model download fails:*
+- Ensure internet connection
+- Model downloads automatically on first run
+- Check PyTorch hub cache: `~/.cache/torch/hub/`
 
 ## License
 
