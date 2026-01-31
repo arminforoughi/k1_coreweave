@@ -53,6 +53,17 @@ export async function renameLabel(labelId: string, newName: string) {
   return res.json();
 }
 
+export async function researchObject(trackId: string) {
+  const res = await fetch(`${API_BASE}/research?track_id=${trackId}`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Failed to trigger research");
+  }
+  return res.json();
+}
+
 export async function checkHealth() {
   const res = await fetch(`${API_BASE}/health`);
   return res.json();

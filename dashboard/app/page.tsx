@@ -7,6 +7,7 @@ import {
   fetchMemory,
   fetchMetrics,
   labelObject,
+  researchObject,
   checkHealth,
 } from "@/lib/api";
 
@@ -56,9 +57,15 @@ export default function Dashboard() {
   const [labels, setLabels] = useState<LabelInfo[]>([]);
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [online, setOnline] = useState(false);
-  const [teachModal, setTeachModal] = useState<{ trackId: string; thumb: string } | null>(null);
+  const [teachModal, setTeachModal] = useState<{
+    trackId: string;
+    thumb: string;
+  } | null>(null);
   const [teachName, setTeachName] = useState("");
   const [teachLoading, setTeachLoading] = useState(false);
+  const [researchingTracks, setResearchingTracks] = useState<Set<string>>(
+    new Set()
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -109,6 +116,24 @@ export default function Dashboard() {
     }
   };
 
+  const handleResearch = async (trackId: string) => {
+    setResearchingTracks((prev) => new Set(prev).add(trackId));
+    try {
+      await researchObject(trackId);
+    } catch (e) {
+      alert("Research failed: " + (e as Error).message);
+    }
+    // Don't remove from set immediately — let polling pick up the result
+    setTimeout(() => {
+      setResearchingTracks((prev) => {
+        const next = new Set(prev);
+        next.delete(trackId);
+        return next;
+      });
+      refresh();
+    }, 5000);
+  };
+
   // Deduplicate objects by track_id (keep most recent)
   const uniqueObjects = objects.reduce<ObjectEvent[]>((acc, obj) => {
     if (!acc.find((o) => o.track_id === obj.track_id)) acc.push(obj);
@@ -118,7 +143,12 @@ export default function Dashboard() {
   return (
     <div className="container">
       <div className="header">
-        <h1>OpenClawdIRL</h1>
+        <div>
+          <h1>OpenClawdIRL</h1>
+          <div style={{ fontSize: "0.8rem", color: "var(--text-dim)" }}>
+            Self-Improving Vision Agent
+          </div>
+        </div>
         <div className="status">
           <div className={`status-dot ${online ? "" : "offline"}`} />
           {online ? "System Online" : "Offline"}
@@ -148,7 +178,10 @@ export default function Dashboard() {
         <div>
           {uniqueObjects.length === 0 ? (
             <div className="empty-state">
-              <p>No objects detected yet. Make sure the perception pipeline is running.</p>
+              <p>
+                No objects detected yet. Make sure the Jetson client and backend
+                are running.
+              </p>
             </div>
           ) : (
             <div className="grid grid-3">
@@ -165,9 +198,12 @@ export default function Dashboard() {
                   )}
                   <div className="object-info">
                     <h3>{obj.label || `Track ${obj.track_id}`}</h3>
-                    <span className={`badge badge-${obj.state}`}>{obj.state}</span>
+                    <span className={`badge badge-${obj.state}`}>
+                      {obj.state}
+                    </span>
                     <div className="meta">
-                      Similarity: {(parseFloat(obj.similarity) * 100).toFixed(1)}%
+                      Similarity:{" "}
+                      {(parseFloat(obj.similarity) * 100).toFixed(1)}%
                     </div>
                     <div className="sim-bar">
                       <div
@@ -184,18 +220,36 @@ export default function Dashboard() {
                       />
                     </div>
                     {obj.state !== "known" && (
-                      <button
-                        className="btn btn-primary"
-                        style={{ marginTop: "0.5rem", fontSize: "0.8rem" }}
-                        onClick={() =>
-                          setTeachModal({
-                            trackId: obj.track_id,
-                            thumb: obj.thumbnail_b64,
-                          })
-                        }
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: "0.4rem",
+                          marginTop: "0.5rem",
+                        }}
                       >
-                        Teach
-                      </button>
+                        <button
+                          className="btn btn-primary"
+                          style={{ fontSize: "0.8rem" }}
+                          onClick={() =>
+                            setTeachModal({
+                              trackId: obj.track_id,
+                              thumb: obj.thumbnail_b64,
+                            })
+                          }
+                        >
+                          Teach
+                        </button>
+                        <button
+                          className="btn"
+                          style={{ fontSize: "0.8rem" }}
+                          onClick={() => handleResearch(obj.track_id)}
+                          disabled={researchingTracks.has(obj.track_id)}
+                        >
+                          {researchingTracks.has(obj.track_id)
+                            ? "Researching..."
+                            : "Research"}
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -231,20 +285,39 @@ export default function Dashboard() {
                     <div className="meta">
                       Track: {u.track_id}
                       <br />
-                      Top sim: {(parseFloat(u.top_similarity) * 100).toFixed(1)}%
+                      Top sim:{" "}
+                      {(parseFloat(u.top_similarity) * 100).toFixed(1)}%
                     </div>
-                    <button
-                      className="btn btn-primary"
-                      style={{ marginTop: "0.5rem", fontSize: "0.8rem" }}
-                      onClick={() =>
-                        setTeachModal({
-                          trackId: u.track_id,
-                          thumb: u.thumbnail_b64,
-                        })
-                      }
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "0.4rem",
+                        marginTop: "0.5rem",
+                      }}
                     >
-                      Teach
-                    </button>
+                      <button
+                        className="btn btn-primary"
+                        style={{ fontSize: "0.8rem" }}
+                        onClick={() =>
+                          setTeachModal({
+                            trackId: u.track_id,
+                            thumb: u.thumbnail_b64,
+                          })
+                        }
+                      >
+                        Teach
+                      </button>
+                      <button
+                        className="btn"
+                        style={{ fontSize: "0.8rem" }}
+                        onClick={() => handleResearch(u.track_id)}
+                        disabled={researchingTracks.has(u.track_id)}
+                      >
+                        {researchingTracks.has(u.track_id)
+                          ? "Researching..."
+                          : "Research"}
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -258,7 +331,10 @@ export default function Dashboard() {
         <div>
           {labels.length === 0 ? (
             <div className="empty-state">
-              <p>No objects learned yet. Teach the system by labeling unknown objects.</p>
+              <p>
+                No objects learned yet. Teach the system by labeling unknown
+                objects, or let Browserbase research them automatically.
+              </p>
             </div>
           ) : (
             <div className="grid grid-3">
@@ -266,10 +342,12 @@ export default function Dashboard() {
                 <div key={l.label_id} className="card">
                   <h3>{l.name}</h3>
                   <div className="meta">
-                    {l.n_examples} exemplar{l.n_examples !== 1 ? "s" : ""} stored
+                    {l.n_examples} exemplar{l.n_examples !== 1 ? "s" : ""}{" "}
+                    stored
                   </div>
                   <div className="meta">
-                    Learned: {new Date(l.created_at * 1000).toLocaleTimeString()}
+                    Learned:{" "}
+                    {new Date(l.created_at * 1000).toLocaleTimeString()}
                   </div>
                 </div>
               ))}
@@ -284,7 +362,10 @@ export default function Dashboard() {
           {metrics ? (
             <div className="grid grid-4">
               <div className="card">
-                <div className="metric-value" style={{ color: "var(--green)" }}>
+                <div
+                  className="metric-value"
+                  style={{ color: "var(--green)" }}
+                >
                   {(metrics.recognition_rate * 100).toFixed(1)}%
                 </div>
                 <div className="metric-label">Recognition Rate</div>
@@ -296,13 +377,19 @@ export default function Dashboard() {
                 <div className="metric-label">Unknown Events</div>
               </div>
               <div className="card">
-                <div className="metric-value" style={{ color: "var(--accent)" }}>
+                <div
+                  className="metric-value"
+                  style={{ color: "var(--accent)" }}
+                >
                   {metrics.memory_size}
                 </div>
                 <div className="metric-label">Embeddings in Memory</div>
               </div>
               <div className="card">
-                <div className="metric-value" style={{ color: "var(--yellow)" }}>
+                <div
+                  className="metric-value"
+                  style={{ color: "var(--yellow)" }}
+                >
                   {metrics.label_count}
                 </div>
                 <div className="metric-label">Learned Labels</div>
@@ -318,11 +405,14 @@ export default function Dashboard() {
                 <div className="card-header">
                   <span className="card-title">Unknown Rate</span>
                 </div>
-                <div className="metric-value" style={{ color: "var(--orange)" }}>
+                <div
+                  className="metric-value"
+                  style={{ color: "var(--orange)" }}
+                >
                   {(metrics.unknown_rate * 100).toFixed(1)}%
                 </div>
                 <div className="metric-label">
-                  This should decrease as you teach more objects
+                  Decreases as objects are taught or researched
                 </div>
               </div>
             </div>

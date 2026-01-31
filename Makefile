@@ -1,6 +1,8 @@
-.PHONY: setup redis-setup perception backend dashboard all clean
+.PHONY: setup redis-setup backend dashboard jetson-client all clean
 
-# Install Python dependencies
+# ===== LAPTOP (runs everything except camera) =====
+
+# Install Python dependencies (laptop)
 setup:
 	pip install -r requirements.txt
 
@@ -8,11 +10,7 @@ setup:
 redis-setup:
 	python infra/setup_redis.py
 
-# Run the perception pipeline
-perception:
-	python -m perception.pipeline
-
-# Run the backend API
+# Run the backend API (receives crops from Jetson, does embedding + KNN)
 backend:
 	python -m backend.api
 
@@ -20,18 +18,36 @@ backend:
 dashboard:
 	cd dashboard && npm install && npm run dev
 
-# Run Redis locally (assumes redis-server is installed)
+# Run Redis via Docker (laptop)
 redis:
-	redis-server --loadmodule /opt/redis-stack/lib/rejson.so --loadmodule /opt/redis-stack/lib/redisearch.so
+	docker run -d --name redis-stack -p 6379:6379 --restart unless-stopped redis/redis-stack-server:latest
 
-# Run everything (in separate terminals)
+# ===== JETSON (thin client only) =====
+
+# Run the Jetson client (camera + YOLO + POST to backend)
+# Usage: make jetson-client BACKEND=http://<laptop-ip>:8000
+jetson-client:
+	python perception/jetson_client.py --backend $(BACKEND)
+
+# Install Jetson-only dependencies
+jetson-setup:
+	pip install -r perception/requirements-jetson.txt
+
+# ===== GENERAL =====
+
+# Run everything (instructions)
 all:
-	@echo "Run these in separate terminals:"
-	@echo "  make redis        # Start Redis (if local)"
-	@echo "  make redis-setup  # Create indexes (once)"
-	@echo "  make backend      # Start API server"
-	@echo "  make perception   # Start camera pipeline"
-	@echo "  make dashboard    # Start web dashboard"
+	@echo "=== Thin Device Architecture ==="
+	@echo ""
+	@echo "ON YOUR LAPTOP (run each in a separate terminal):"
+	@echo "  make redis          # Start Redis Stack (once)"
+	@echo "  make redis-setup    # Create indexes (once)"
+	@echo "  make backend        # Start API + embedder + KNN"
+	@echo "  make dashboard      # Start web dashboard"
+	@echo ""
+	@echo "ON THE JETSON:"
+	@echo "  make jetson-setup                                    # Install deps (once)"
+	@echo "  make jetson-client BACKEND=http://<laptop-ip>:8000   # Start camera"
 
 # Clean up
 clean:
