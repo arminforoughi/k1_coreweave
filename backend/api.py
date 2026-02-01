@@ -37,11 +37,16 @@ from perception.tracker import SimpleTracker
 load_dotenv()
 config = load_config()
 
-# Init Weave (graceful if no W&B credentials)
-try:
-    weave.init(config.weave.project)
-except (ValueError, Exception) as e:
-    print(f"Weave init skipped ({e}) — set WANDB_API_KEY + WANDB_ENTITY to enable tracing")
+# Init Weave for observability tracing
+entity_name = config.weave.entity
+if entity_name and config.weave.api_key:
+    try:
+        weave.init(f"{entity_name}/{config.weave.project}")
+        print(f"Weave tracing enabled: {entity_name}/{config.weave.project}")
+    except Exception as e:
+        print(f"Weave init failed ({e})")
+else:
+    print("Weave disabled — set WANDB_API_KEY + WANDB_ENTITY to enable tracing")
 
 # Init Redis
 r = redis.from_url(config.redis.url, decode_responses=True)
@@ -192,7 +197,7 @@ def health():
 
 @weave.op()
 @app.post("/ingest")
-def ingest_frame(req: IngestRequest):
+def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
     """Receive detections + crops from Jetson, run embedding + KNN + gating.
 
     This is the main endpoint called by the Jetson client every frame.
@@ -284,6 +289,14 @@ def ingest_frame(req: IngestRequest):
                 )
                 r.xadd(STREAM_VISION_UNKNOWN, unknown_event.to_redis(), maxlen=500)
                 r.incr(METRICS_UNKNOWN_COUNT)
+                # Auto-trigger Browserbase research (no manual intervention)
+                background_tasks.add_task(
+                    _do_research,
+                    track_id=matched_track.track_id,
+                    thumbnail_b64=det.crop_b64,
+                    yolo_hint=det.yolo_class,
+                    yolo_confidence=det.yolo_confidence,
+                )
 
         results.append({
             "track_id": matched_track.track_id,
@@ -402,15 +415,12 @@ def trigger_research(track_id: str, background_tasks: BackgroundTasks):
     return {"status": "research_queued", "track_id": track_id}
 
 
-def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str):
-    """Background task: research an unknown object via Browserbase.
-
-    This is a placeholder — the actual Browserbase integration goes in
-    workers/research/researcher.py and is called from here.
-    """
+def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
+                  yolo_confidence: float = 0.0):
+    """Background task: research an unknown object via Browserbase/YOLO fallback."""
     try:
         from workers.research.researcher import research_object
-        result = research_object(thumbnail_b64, yolo_hint)
+        result = research_object(thumbnail_b64, yolo_hint, yolo_confidence=yolo_confidence)
 
         if result and result.get("confidence", 0) > 0.7:
             # Auto-label if research is confident
