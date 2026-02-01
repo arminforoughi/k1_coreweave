@@ -25,6 +25,14 @@ import numpy as np
 import httpx
 import redis
 
+# Browserbase research integration
+try:
+    from workers.research.researcher import research_object, BROWSERBASE_API_KEY
+    RESEARCH_AVAILABLE = bool(BROWSERBASE_API_KEY)
+except ImportError:
+    RESEARCH_AVAILABLE = False
+    research_object = None
+
 load_dotenv()
 
 # Audio recording/playback
@@ -256,13 +264,66 @@ class VisionClient:
             parts.append(f"{count} {cls}{plural} ({conf}% confidence)")
         
         return "Currently detecting: " + ", ".join(parts)
+    
+    def get_latest_object_crop_b64(self) -> tuple[Optional[str], str, float]:
+        """Get the latest detected object crop for research.
+        
+        Returns:
+            tuple: (crop_b64, yolo_class, yolo_confidence) or (None, "", 0) if unavailable
+        """
+        # Try to get from Redis (object crops stored by detection pipeline)
+        if self.redis:
+            try:
+                # Get the most recent object crop
+                crop_data = self.redis.get("latest_object_crop")
+                if crop_data:
+                    data = json.loads(crop_data)
+                    return (
+                        data.get("thumbnail_b64", ""),
+                        data.get("yolo_class", "unknown"),
+                        float(data.get("yolo_confidence", 0))
+                    )
+            except Exception:
+                pass
+        
+        # Fallback: try HTTP API for latest detection with crop
+        try:
+            with httpx.Client() as client:
+                resp = client.get(
+                    f"{self.backend_url}/events/objects",
+                    params={"count": 1, "include_crops": True},
+                    timeout=5.0
+                )
+                if resp.status_code == 200:
+                    events = resp.json().get("events", [])
+                    if events:
+                        e = events[0]
+                        return (
+                            e.get("thumbnail_b64", ""),
+                            e.get("yolo_class", e.get("label", "unknown")),
+                            float(e.get("yolo_confidence", e.get("similarity", 0)))
+                        )
+        except Exception:
+            pass
+        
+        return (None, "", 0.0)
 
 
 class K1VoiceChat:
     """
     Voice chat with K1 robot.
     Uses laptop mic/speaker + vision from robot.
+    Now with Browserbase research for deep object identification!
     """
+    
+    # Keywords that trigger web research
+    RESEARCH_KEYWORDS = [
+        "research", "look up", "lookup", "search", "find out", "google",
+        "tell me more", "what is that", "identify", "what's that",
+        "more about", "details", "information about", "info on",
+        "learn more", "find more", "who made", "manufacturer",
+        "price", "how much", "where can i buy", "specs", "specifications"
+    ]
     
     def __init__(
         self,
@@ -280,6 +341,9 @@ class K1VoiceChat:
         
         self.conversation_history = []
         self.system_prompt = self._get_system_prompt()
+        
+        # Track last research result for follow-up questions
+        self.last_research_result = None
     
     def _get_system_prompt(self) -> str:
         return """You are K1, a friendly robot assistant with vision capabilities.
@@ -299,7 +363,112 @@ For general conversation:
 Important: Your responses will be spoken aloud, so:
 - Keep them short and natural
 - Avoid lists or bullet points
-- Use conversational language"""
+- Use conversational language
+
+You also have a research capability. When the user asks to research an object,
+you can search the web for detailed product information, specs, and pricing."""
+    
+    def _is_research_query(self, text: str) -> bool:
+        """Check if the user is asking for web research."""
+        text_lower = text.lower()
+        return any(kw in text_lower for kw in self.RESEARCH_KEYWORDS)
+    
+    def do_research(self, speak_updates: bool = True) -> Optional[dict]:
+        """Perform Browserbase research on the latest detected object.
+        
+        Args:
+            speak_updates: If True, speak status updates during research
+            
+        Returns:
+            Research result dict or None if research failed/unavailable
+        """
+        if not RESEARCH_AVAILABLE:
+            return None
+        
+        # Get the latest object crop
+        crop_b64, yolo_class, yolo_conf = self.vision.get_latest_object_crop_b64()
+        
+        if not crop_b64:
+            # Try using the current frame if no crop available
+            frame_b64 = self.vision.get_latest_frame_b64()
+            detections = self.vision.get_latest_detections()
+            
+            if frame_b64 and detections:
+                # Use the highest confidence detection as hint
+                best_det = max(detections, key=lambda d: d.get("confidence", 0))
+                crop_b64 = frame_b64  # Use full frame
+                yolo_class = best_det.get("class_name", "object")
+                yolo_conf = best_det.get("confidence", 0)
+            else:
+                return None
+        
+        if speak_updates:
+            self.speak(f"Researching the {yolo_class}. This may take a few seconds.")
+        
+        print(f"{Colors.CYAN}🔍 Starting web research for: {yolo_class}{Colors.END}")
+        
+        try:
+            result = research_object(
+                thumbnail_b64=crop_b64,
+                yolo_hint=yolo_class,
+                yolo_confidence=yolo_conf
+            )
+            
+            if result:
+                self.last_research_result = result
+                print(f"{Colors.GREEN}✓ Research complete: {result.get('label')}{Colors.END}")
+                return result
+            else:
+                print(f"{Colors.YELLOW}⚠ Research returned no results{Colors.END}")
+                return None
+                
+        except Exception as e:
+            print(f"{Colors.RED}✗ Research failed: {e}{Colors.END}")
+            return None
+    
+    def format_research_for_speech(self, result: dict) -> str:
+        """Format research results into natural speech."""
+        parts = []
+        
+        label = result.get("label", "unknown object")
+        confidence = result.get("confidence", 0)
+        
+        # Main identification
+        if confidence >= 0.8:
+            parts.append(f"I'm pretty confident this is a {label}.")
+        elif confidence >= 0.6:
+            parts.append(f"This looks like a {label}.")
+        else:
+            parts.append(f"I think this might be a {label}, but I'm not entirely sure.")
+        
+        # Description
+        desc = result.get("web_description") or result.get("description")
+        if desc and len(desc) < 200:
+            parts.append(desc)
+        
+        # Manufacturer
+        manufacturer = result.get("manufacturer")
+        if manufacturer:
+            parts.append(f"It's made by {manufacturer}.")
+        
+        # Price
+        price = result.get("price")
+        if price:
+            parts.append(f"The price is around {price}.")
+        
+        # Key specs (just a couple)
+        specs = result.get("specs", [])
+        if specs and len(specs) >= 2:
+            parts.append(f"Key specs include {specs[0]} and {specs[1]}.")
+        elif specs:
+            parts.append(f"One key spec is {specs[0]}.")
+        
+        # Safety info
+        safety = result.get("safety_info")
+        if safety and "high" in safety.lower():
+            parts.append(f"Safety note: {safety}")
+        
+        return " ".join(parts)
     
     def transcribe(self, audio_bytes: bytes) -> str:
         """Transcribe audio to text using Whisper."""
@@ -313,7 +482,24 @@ Important: Your responses will be spoken aloud, so:
         return transcript.text
     
     def get_response(self, user_text: str, include_vision: bool = True) -> str:
-        """Get AI response, optionally with vision context."""
+        """Get AI response, optionally with vision context.
+        
+        If this is a research query and Browserbase is available, performs
+        web research first and includes results in the response.
+        """
+        
+        # Check if this is a research request
+        if self._is_research_query(user_text) and RESEARCH_AVAILABLE:
+            result = self.do_research(speak_updates=True)
+            if result:
+                # Return formatted research results
+                response_text = self.format_research_for_speech(result)
+                self.conversation_history.append({"role": "user", "content": user_text})
+                self.conversation_history.append({"role": "assistant", "content": response_text})
+                return response_text
+            else:
+                # Fall through to normal response if research failed
+                pass
         
         # Check if this is a vision-related query
         vision_keywords = ["see", "look", "looking", "visible", "camera", "what", 
@@ -381,7 +567,12 @@ Important: Your responses will be spoken aloud, so:
         print(f"{Colors.CYAN}{'=' * 50}{Colors.END}")
         print(f"Press {Colors.BOLD}Enter{Colors.END} to start speaking, {Colors.BOLD}Enter{Colors.END} again to stop.")
         print(f"Say {Colors.BOLD}'quit'{Colors.END} or {Colors.BOLD}'exit'{Colors.END} to end the session.")
-        print(f"Ask things like: {Colors.YELLOW}\"What do you see?\"{Colors.END}")
+        print(f"\n{Colors.BOLD}Example commands:{Colors.END}")
+        print(f"  • {Colors.YELLOW}\"What do you see?\"{Colors.END} - Describe current view")
+        if RESEARCH_AVAILABLE:
+            print(f"  • {Colors.YELLOW}\"Research that object\"{Colors.END} - Deep web search")
+            print(f"  • {Colors.YELLOW}\"Tell me more about that\"{Colors.END} - Get product details")
+            print(f"  • {Colors.YELLOW}\"What is that thing?\"{Colors.END} - Identify + research")
         print(f"{Colors.CYAN}{'=' * 50}{Colors.END}\n")
         
         # Check vision connection
@@ -395,10 +586,19 @@ Important: Your responses will be spoken aloud, so:
         else:
             print(f"{Colors.YELLOW}⚠ No camera feed available. Make sure the robot/backend is running.{Colors.END}")
         
+        # Check research capability
+        if RESEARCH_AVAILABLE:
+            print(f"{Colors.GREEN}✓ Web research enabled (Browserbase){Colors.END}")
+        else:
+            print(f"{Colors.YELLOW}⚠ Web research disabled (set BROWSERBASE_API_KEY to enable){Colors.END}")
+        
         print()
         
         # Greeting
-        greeting = "Hi! I'm K1. Ask me what I can see, or let's just chat!"
+        if RESEARCH_AVAILABLE:
+            greeting = "Hi! I'm K1. Ask me what I can see, or say 'research that' to learn more about an object!"
+        else:
+            greeting = "Hi! I'm K1. Ask me what I can see, or let's just chat!"
         print(f"{Colors.GREEN}K1: {greeting}{Colors.END}")
         self.speak(greeting)
         

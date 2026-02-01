@@ -15,9 +15,76 @@ import io
 import sys
 import cv2
 import numpy as np
+import concurrent.futures
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
+
+# Browserbase research integration
+try:
+    from workers.research.researcher import research_object, BROWSERBASE_API_KEY
+    RESEARCH_AVAILABLE = bool(BROWSERBASE_API_KEY)
+except ImportError:
+    RESEARCH_AVAILABLE = False
+    research_object = None
+
+# Keywords that trigger web research
+RESEARCH_KEYWORDS = [
+    "research", "look up", "lookup", "search", "find out", "google",
+    "tell me more", "what is that", "identify", "what's that",
+    "more about", "details", "information about", "info on",
+    "learn more", "find more", "who made", "manufacturer",
+    "price", "how much", "where can i buy", "specs", "specifications"
+]
+
+def is_research_query(text: str) -> bool:
+    """Check if the user is asking for web research."""
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in RESEARCH_KEYWORDS)
+
+def format_research_for_speech(result: dict) -> str:
+    """Format research results into natural speech."""
+    parts = []
+    
+    label = result.get("label", "unknown object")
+    confidence = result.get("confidence", 0)
+    
+    # Main identification
+    if confidence >= 0.8:
+        parts.append(f"I'm pretty confident this is a {label}.")
+    elif confidence >= 0.6:
+        parts.append(f"This looks like a {label}.")
+    else:
+        parts.append(f"I think this might be a {label}, but I'm not entirely sure.")
+    
+    # Description
+    desc = result.get("web_description") or result.get("description")
+    if desc and len(desc) < 200:
+        parts.append(desc)
+    
+    # Manufacturer
+    manufacturer = result.get("manufacturer")
+    if manufacturer:
+        parts.append(f"It's made by {manufacturer}.")
+    
+    # Price
+    price = result.get("price")
+    if price:
+        parts.append(f"The price is around {price}.")
+    
+    # Key specs (just a couple)
+    specs = result.get("specs", [])
+    if specs and len(specs) >= 2:
+        parts.append(f"Key specs include {specs[0]} and {specs[1]}.")
+    elif specs:
+        parts.append(f"One key spec is {specs[0]}.")
+    
+    # Safety info
+    safety = result.get("safety_info")
+    if safety and "high" in safety.lower():
+        parts.append(f"Safety note: {safety}")
+    
+    return " ".join(parts)
 
 # Pipecat imports
 from pipecat.pipeline.pipeline import Pipeline
@@ -585,7 +652,7 @@ async def index():
 <body>
     <div class="container">
         <h1>🤖 K1 Vision</h1>
-        <p class="subtitle">Ask me what I see</p>
+        <p class="subtitle">Ask me what I see • Say "research that" for deep search</p>
         
         <div class="orb-container">
             <div class="orb" id="orb" onclick="toggleRecording()">
@@ -664,7 +731,7 @@ async def index():
                 orb.classList.remove('listening');
                 orb.classList.add('processing');
                 orbIcon.textContent = '⏳';
-                status.textContent = 'Processing...';
+                status.textContent = 'Processing... (research queries may take 10-15s)';
             }
         }
         
@@ -685,7 +752,10 @@ async def index():
                 // Show transcript
                 transcript.style.display = 'block';
                 addMessage('You', data.transcription, 'user');
-                addMessage('K1', data.response, 'assistant');
+                
+                // Check if this was a research response
+                const prefix = data.research ? '🔍 ' : '';
+                addMessage('K1', prefix + data.response, 'assistant');
                 
                 // Play audio response
                 orb.classList.remove('processing');
@@ -724,7 +794,11 @@ async def index():
 
 @app.post("/voice/query")
 async def voice_query(audio: UploadFile = File(...)):
-    """Process voice query and return text response."""
+    """Process voice query and return text response.
+    
+    If the query is a research request and Browserbase is configured,
+    performs deep web research on the detected object.
+    """
     if voice_bot is None:
         raise HTTPException(status_code=503, detail="Voice bot not initialized")
     
@@ -753,7 +827,43 @@ async def voice_query(audio: UploadFile = File(...)):
     image_b64 = await vision_provider.get_frame_base64() if vision_provider else None
     detection_summary = await vision_provider.get_detection_summary() if vision_provider else "No camera available"
     
-    # Build messages
+    # Check if this is a research request
+    if is_research_query(user_text) and RESEARCH_AVAILABLE and image_b64:
+        # Get YOLO hint from detections
+        yolo_hint = "object"
+        yolo_conf = 0.0
+        if vision_provider and vision_provider.latest_detections:
+            # Get highest confidence detection
+            best_det = max(vision_provider.latest_detections, 
+                          key=lambda d: d.get("confidence", 0))
+            yolo_hint = best_det.get("class_name", "object")
+            yolo_conf = best_det.get("confidence", 0)
+        
+        # Run research in thread pool (it's sync/blocking)
+        loop = asyncio.get_event_loop()
+        try:
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                result = await loop.run_in_executor(
+                    pool,
+                    research_object,
+                    image_b64,
+                    yolo_hint,
+                    yolo_conf
+                )
+            
+            if result:
+                response_text = format_research_for_speech(result)
+                return {
+                    "transcription": user_text,
+                    "response": response_text,
+                    "detections": detection_summary,
+                    "research": result
+                }
+        except Exception as e:
+            print(f"Research failed: {e}")
+            # Fall through to normal response
+    
+    # Build messages for normal query
     system_prompt = """You are K1, a friendly robot assistant with vision capabilities.
 You can see through your camera and describe what you observe.
 
@@ -856,7 +966,8 @@ async def health():
     return {
         "status": "ok",
         "camera": vision_provider is not None and vision_provider.latest_frame is not None,
-        "voice": voice_bot is not None
+        "voice": voice_bot is not None,
+        "research": RESEARCH_AVAILABLE
     }
 
 
