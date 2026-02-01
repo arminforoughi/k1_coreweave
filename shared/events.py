@@ -18,6 +18,8 @@ class ObjectEvent:
     embedding: Optional[list] = None
     depth_value: Optional[float] = None
     crop_quality: Optional[float] = None
+    yolo_class: str = ""
+    yolo_confidence: float = 0.0
     timestamp: float = field(default_factory=time.time)
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
@@ -36,6 +38,7 @@ class ObjectEvent:
         emb = data.get("embedding", "")
         data["embedding"] = json.loads(emb) if emb else None
         data["similarity"] = float(data.get("similarity", 0))
+        data["yolo_confidence"] = float(data.get("yolo_confidence", 0))
         data["timestamp"] = float(data.get("timestamp", 0))
         dv = data.get("depth_value", "")
         data["depth_value"] = float(dv) if dv else None
@@ -53,6 +56,8 @@ class UnknownEvent:
     top_similarity: float = 0.0
     depth_value: Optional[float] = None
     crop_quality: Optional[float] = None
+    yolo_class: str = ""
+    yolo_confidence: float = 0.0
     timestamp: float = field(default_factory=time.time)
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
@@ -69,6 +74,7 @@ class UnknownEvent:
         emb = data.get("embedding", "")
         data["embedding"] = json.loads(emb) if emb else None
         data["top_similarity"] = float(data.get("top_similarity", 0))
+        data["yolo_confidence"] = float(data.get("yolo_confidence", 0))
         data["timestamp"] = float(data.get("timestamp", 0))
         dv = data.get("depth_value", "")
         data["depth_value"] = float(dv) if dv else None

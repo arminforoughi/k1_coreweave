@@ -10,6 +10,7 @@ import threading
 import numpy as np
 import redis
 import weave
+import logging
 from io import BytesIO
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -17,6 +18,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 from PIL import Image
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 from shared.config import load_config
 from shared.redis_keys import (
@@ -84,13 +91,24 @@ app.add_middleware(
 @weave.op()
 def embed_crop_op(crop_array: np.ndarray) -> np.ndarray:
     """Embed an object crop."""
-    return embedder.embed(crop_array)
+    logger.debug(f"🧬 embed_crop_op: Input shape {crop_array.shape}")
+    embedding = embedder.embed(crop_array)
+    logger.debug(f"   → Output: 1280-dim embedding (first 3 values: [{embedding[0]:.3f}, {embedding[1]:.3f}, {embedding[2]:.3f}])")
+    return embedding
 
 
 @weave.op()
 def knn_lookup_op(vector: np.ndarray) -> list[dict]:
     """KNN lookup against vector memory."""
-    return memory.knn_lookup(vector, k=5)
+    logger.debug(f"🔎 knn_lookup_op: Searching for top-5 matches...")
+    matches = memory.knn_lookup(vector, k=5)
+    if matches:
+        logger.info(f"   → Top match: '{matches[0].get('label_name')}' (similarity={matches[0].get('similarity', 0):.3f})")
+        if len(matches) > 1:
+            logger.info(f"   → 2nd match: '{matches[1].get('label_name')}' (similarity={matches[1].get('similarity', 0):.3f})")
+    else:
+        logger.info(f"   → No matches found in memory")
+    return matches
 
 
 @weave.op()
@@ -103,10 +121,13 @@ def gate_decision_op(
     prefilter_action: str = None,
 ) -> dict:
     """Decide known/uncertain/unknown using KNN + YOLO + depth signals."""
+    logger.debug(f"🚦 gate_decision_op: YOLO='{yolo_class}' ({yolo_confidence:.2f}), depth={depth_value}, quality={crop_quality}")
     state, label, similarity = gating.decide(matches)
+    logger.debug(f"   → Initial decision: state='{state}', label='{label}', similarity={similarity:.3f}")
 
     # If KNN has no opinion but YOLO is very confident, trust YOLO
     if state == "unknown" and yolo_confidence >= 0.75:
+        logger.debug(f"   → YOLO override: promoting to 'uncertain' (YOLO confidence {yolo_confidence:.2f} >= 0.75)")
         state = "uncertain"
         label = yolo_class
         similarity = yolo_confidence
@@ -115,6 +136,7 @@ def gate_decision_op(
     # high-quality capture — promote to uncertain so the learning flow
     # engages sooner (research/teach).
     if prefilter_action == "priority" and state == "unknown":
+        logger.debug(f"   → Priority flag: promoting to 'uncertain' for learning")
         state = "uncertain"
         label = yolo_class
 
@@ -122,10 +144,14 @@ def gate_decision_op(
     if depth_value is not None:
         # Close object + borderline uncertain → trust KNN more (good crop)
         if depth_value > 0.5 and state == "uncertain" and similarity >= 0.6:
+            logger.debug(f"   → Depth adjustment: promoting to 'known' (close object, good crop)")
             state = "known"
         # Far object + borderline known → trust KNN less (poor crop quality)
         if depth_value < 0.15 and state == "known" and similarity < 0.8:
+            logger.debug(f"   → Depth adjustment: demoting to 'uncertain' (far object, poor quality)")
             state = "uncertain"
+
+    logger.info(f"✅ FINAL DECISION: state='{state}', label='{label}', similarity={similarity:.3f}")
 
     return {
         "state": state,
@@ -267,6 +293,8 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
             embedding=matched_track.embedding.tolist() if state != "known" else None,
             depth_value=det.depth_value,
             crop_quality=det.crop_quality,
+            yolo_class=det.yolo_class,
+            yolo_confidence=det.yolo_confidence,
         )
         r.xadd(STREAM_VISION_OBJECTS, event.to_redis(), maxlen=1000)
 
@@ -286,6 +314,8 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
                     top_similarity=similarity,
                     depth_value=det.depth_value,
                     crop_quality=det.crop_quality,
+                    yolo_class=det.yolo_class,
+                    yolo_confidence=det.yolo_confidence,
                 )
                 r.xadd(STREAM_VISION_UNKNOWN, unknown_event.to_redis(), maxlen=500)
                 r.incr(METRICS_UNKNOWN_COUNT)
@@ -392,24 +422,44 @@ def label_object(req: LabelRequest):
 @weave.op()
 @app.post("/research")
 def trigger_research(track_id: str, background_tasks: BackgroundTasks):
-    """Trigger Browserbase research for an unknown object."""
-    # Find the unknown event
+    """Trigger Browserbase research for an unknown or uncertain object."""
+    logger.info(f"🔬 Research request for track_id: {track_id}")
+
+    # Try to find in unknown queue first
+    logger.debug(f"   → Searching in stream:vision:unknown...")
     entries = r.xrevrange(STREAM_VISION_UNKNOWN, count=100)
     target = None
     for entry_id, data in entries:
         if data.get("track_id") == track_id:
             target = data
+            logger.info(f"   ✅ Found in unknown queue")
             break
 
+    # If not in unknown queue, search in objects stream (for uncertain objects)
     if not target:
-        raise HTTPException(status_code=404, detail=f"No unknown event for track {track_id}")
+        logger.debug(f"   → Not in unknown queue, searching in stream:vision:objects...")
+        entries = r.xrevrange(STREAM_VISION_OBJECTS, count=200)
+        for entry_id, data in entries:
+            if data.get("track_id") == track_id:
+                target = data
+                logger.info(f"   ✅ Found in objects stream (state: {data.get('state')})")
+                break
+
+    if not target:
+        logger.error(f"   ❌ Track {track_id} not found in any stream")
+        raise HTTPException(status_code=404, detail=f"Track {track_id} not found in recent events")
 
     # Queue research in background
+    yolo_hint = target.get("yolo_class", "")
+    yolo_conf = float(target.get("yolo_confidence", 0))
+    logger.info(f"   → Queuing research with YOLO hint: '{yolo_hint}' (conf: {yolo_conf:.2f})")
+
     background_tasks.add_task(
         _do_research,
         track_id=track_id,
         thumbnail_b64=target.get("thumbnail_b64", ""),
-        yolo_hint=target.get("yolo_class", ""),
+        yolo_hint=yolo_hint,
+        yolo_confidence=yolo_conf,
     )
 
     return {"status": "research_queued", "track_id": track_id}
@@ -418,11 +468,14 @@ def trigger_research(track_id: str, background_tasks: BackgroundTasks):
 def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                   yolo_confidence: float = 0.0):
     """Background task: research an unknown object via Browserbase/YOLO fallback."""
+    logger.info(f"🔬 Starting research for track '{track_id}' (YOLO hint: '{yolo_hint}', conf: {yolo_confidence:.2f})")
     try:
         from workers.research.researcher import research_object
         result = research_object(thumbnail_b64, yolo_hint, yolo_confidence=yolo_confidence)
+        logger.info(f"   → Research result: {result}")
 
         if result and result.get("confidence", 0) > 0.7:
+            logger.info(f"✅ High confidence result ({result.get('confidence'):.2f}) - AUTO-LABELING as '{result['label']}'")
             # Auto-label if research is confident
             # Find embedding for this track
             entries = r.xrevrange(STREAM_VISION_UNKNOWN, count=100)
@@ -432,7 +485,9 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                     if emb_str:
                         embedding = np.array(json.loads(emb_str), dtype=np.float32)
                         label_name = result["label"]
+                        logger.info(f"   → Storing embedding in memory under label '{label_name}'")
                         label_id = learn_label_op(label_name, [embedding])
+                        logger.info(f"   → Label stored with ID: {label_id}")
 
                         # Emit events
                         label_event = LabelEvent(
@@ -441,6 +496,7 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                             label_id=label_id,
                         )
                         r.xadd(STREAM_VISION_LABELS, label_event.to_redis(), maxlen=500)
+                        logger.info(f"   → Published to stream:vision:labels")
 
                         # Store research result
                         r.xadd(STREAM_VISION_RESEARCHED, {
@@ -452,8 +508,11 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                             "auto_labeled": "true",
                             "timestamp": str(time.time()),
                         }, maxlen=500)
+                        logger.info(f"   → Published to stream:vision:researched")
                     break
         else:
+            confidence = result.get("confidence", 0) if result else 0
+            logger.warning(f"⚠️  Low confidence result ({confidence:.2f}) - queuing for manual review")
             # Low confidence — put in queue for manual review
             r.xadd(STREAM_VISION_RESEARCHED, {
                 "track_id": track_id,
@@ -465,9 +524,9 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
             }, maxlen=500)
 
     except ImportError:
-        print(f"Research worker not available for track {track_id}")
+        logger.error(f"❌ Research worker not available for track {track_id}")
     except Exception as e:
-        print(f"Research failed for track {track_id}: {e}")
+        logger.error(f"❌ Research failed for track {track_id}: {e}", exc_info=True)
 
 
 @app.get("/memory")
