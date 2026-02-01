@@ -21,68 +21,192 @@ load_dotenv()
 BROWSERBASE_API_KEY = os.getenv("BROWSERBASE_API_KEY", "")
 BROWSERBASE_PROJECT_ID = os.getenv("BROWSERBASE_PROJECT_ID", "")
 MODEL_API_KEY = os.getenv("MODEL_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 
-def _research_via_stagehand(yolo_hint: str) -> dict | None:
-    """Use Stagehand v3.5 session API to search the web."""
-    from stagehand import Stagehand
+def _research_via_gpt_vision(thumbnail_b64: str, yolo_hint: str) -> dict | None:
+    """Use GPT-5+ vision to analyze the image."""
+    from openai import OpenAI
 
-    client = Stagehand(
-        browserbase_api_key=BROWSERBASE_API_KEY,
-        browserbase_project_id=BROWSERBASE_PROJECT_ID,
-        model_api_key=MODEL_API_KEY,
-    )
+    if not thumbnail_b64 or not OPENAI_API_KEY:
+        return None
 
-    search_query = f"what is a {yolo_hint} object identify" if yolo_hint else "identify unknown household object"
-
-    session_response = client.sessions.start(model_name="anthropic/claude-sonnet-4-5-20250929")
-    session_id = session_response.data.session_id
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
     try:
-        client.sessions.navigate(session_id, url="https://www.google.com")
-        client.sessions.act(session_id, input=f'type "{search_query}" in the search box and press Enter to search')
+        response = client.chat.completions.create(
+            model="gpt-5",  # Will try gpt-5, fall back to latest available
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{thumbnail_b64}",
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": f"""Look at this image. A vision system detected an object and guessed it might be a "{yolo_hint}".
 
-        result = client.sessions.extract(
-            session_id,
-            instruction=(
-                f"Look at the search results. I'm trying to identify an object that "
-                f"a camera detected. The detection system guessed it might be a '{yolo_hint}'. "
-                f"Extract the most likely identity of this object."
-            ),
-            schema={
-                "type": "object",
-                "properties": {
-                    "label": {"type": "string"},
-                    "description": {"type": "string"},
-                    "facts": {"type": "array", "items": {"type": "string"}},
-                    "confidence": {"type": "number"},
-                },
-            },
+Your task: Identify what specific object this is. Provide:
+1. A specific label (e.g., "MacBook Pro 14-inch", "IKEA desk lamp", "ceramic coffee mug") - be as specific as possible
+2. A brief description
+3. Key identifying features
+4. Your confidence (0.0 to 1.0)
+
+Respond in JSON format:
+{{
+  "label": "specific object name",
+  "description": "brief description",
+  "facts": ["fact 1", "fact 2", "fact 3"],
+  "confidence": 0.0-1.0
+}}"""
+                        }
+                    ],
+                }
+            ],
         )
 
-        if result and hasattr(result, "data"):
-            # result.data is a Data object with a 'result' attribute containing the extracted dict
-            extracted = result.data.result if hasattr(result.data, 'result') else result.data
-            if isinstance(extracted, dict):
-                extracted["source"] = "browserbase_search"
-                return extracted
-            else:
-                data = json.loads(str(extracted))
-                data["source"] = "browserbase_search"
-                return data
-    finally:
-        try:
-            client.sessions.end(session_id)
-        except Exception:
-            pass
+        response_text = response.choices[0].message.content
+
+        # Try to extract JSON from the response
+        import re
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group())
+            result["source"] = "gpt_vision"
+            result["model"] = response.model
+            return result
+
+    except Exception as e:
+        print(f"GPT vision analysis failed: {e}")
 
     return None
+
+
+def _research_via_claude_vision(thumbnail_b64: str, yolo_hint: str, use_opus: bool = False) -> dict | None:
+    """Use Claude vision via Anthropic API to analyze the image directly.
+
+    Args:
+        use_opus: If True, use Claude Opus 4.5 for better accuracy (slower, more expensive)
+    """
+    from anthropic import Anthropic
+
+    if not thumbnail_b64:
+        return None
+
+    anthropic = Anthropic(api_key=MODEL_API_KEY)
+    model = "claude-opus-4-5-20251101" if use_opus else "claude-sonnet-4-5-20250929"
+
+    try:
+        vision_response = anthropic.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": thumbnail_b64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": f"""Look at this image. A vision system detected an object and guessed it might be a "{yolo_hint}".
+
+Your task: Identify what specific object this is. Provide:
+1. A specific label (e.g., "MacBook Pro 14-inch", "IKEA desk lamp", "ceramic coffee mug") - be as specific as possible
+2. A brief description
+3. Key identifying features
+4. Your confidence (0.0 to 1.0)
+
+Respond in JSON format:
+{{
+  "label": "specific object name",
+  "description": "brief description",
+  "facts": ["fact 1", "fact 2", "fact 3"],
+  "confidence": 0.0-1.0
+}}"""
+                        }
+                    ],
+                }
+            ],
+        )
+
+        # Parse Claude's response
+        response_text = vision_response.content[0].text
+
+        # Try to extract JSON from the response
+        import re
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group())
+            result["source"] = "claude_opus_vision" if use_opus else "claude_sonnet_vision"
+            result["model"] = model
+            return result
+
+    except Exception as e:
+        print(f"Claude vision analysis failed: {e}")
+
+    return None
+
+
+def _research_via_image_search(thumbnail_b64: str, yolo_hint: str) -> dict | None:
+    """Multi-model image analysis with ensemble voting.
+
+    Tries GPT-5+ first (if available), then Claude Sonnet 4.5.
+    For low-confidence results (<0.7), escalates to Claude Opus 4.5.
+    """
+    if not thumbnail_b64:
+        return None
+
+    results = []
+
+    # Try GPT-5+ first if OpenAI key available
+    if OPENAI_API_KEY:
+        gpt_result = _research_via_gpt_vision(thumbnail_b64, yolo_hint)
+        if gpt_result:
+            results.append(gpt_result)
+            # If GPT is highly confident, return immediately
+            if gpt_result.get("confidence", 0) >= 0.85:
+                return gpt_result
+
+    # Try Claude Sonnet for speed
+    claude_result = _research_via_claude_vision(thumbnail_b64, yolo_hint, use_opus=False)
+    if claude_result:
+        results.append(claude_result)
+        # If Claude Sonnet is highly confident, return immediately
+        if claude_result.get("confidence", 0) >= 0.85:
+            return claude_result
+
+    # If we have results but low confidence, try Claude Opus for second opinion
+    if results:
+        max_confidence = max(r.get("confidence", 0) for r in results)
+        if max_confidence < 0.7:
+            opus_result = _research_via_claude_vision(thumbnail_b64, yolo_hint, use_opus=True)
+            if opus_result:
+                results.append(opus_result)
+
+    # Return the highest confidence result
+    if results:
+        return max(results, key=lambda r: r.get("confidence", 0))
+
+    return None
+
+
 
 
 @weave.op()
 def research_object(thumbnail_b64: str, yolo_hint: str = "",
                     yolo_confidence: float = 0.0) -> dict:
-    """Research an unknown object using Browserbase + Stagehand.
+    """Research an unknown object using vision APIs (Claude/GPT).
 
     Args:
         thumbnail_b64: Base64 JPEG of the object crop
@@ -93,14 +217,14 @@ def research_object(thumbnail_b64: str, yolo_hint: str = "",
         dict with keys: label, confidence (0-1), description, source, facts[]
         Returns None if research fails entirely.
     """
-    # Try Stagehand if all keys are present
-    if BROWSERBASE_API_KEY and MODEL_API_KEY:
+    # Try vision APIs directly
+    if thumbnail_b64:
         try:
-            result = _research_via_stagehand(yolo_hint)
+            result = _research_via_image_search(thumbnail_b64, yolo_hint)
             if result:
                 return result
         except Exception as e:
-            print(f"Browserbase research failed: {e}")
+            print(f"Vision API research failed: {e}")
 
     # Fallback: use YOLO hint with scaled confidence.
     # YOLO classes come from COCO's 80-class vocabulary — "person", "chair",

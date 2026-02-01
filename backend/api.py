@@ -7,12 +7,13 @@ import json
 import time
 import base64
 import threading
+import subprocess
 import numpy as np
 import redis
 import weave
 from io import BytesIO
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -289,9 +290,9 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
                     yolo_class=det.yolo_class,
                     yolo_confidence=det.yolo_confidence,
                 )
-                r.xadd(STREAM_VISION_UNKNOWN, unknown_event.to_redis(), maxlen=500)
+                r.xadd(STREAM_VISION_UNKNOWN, unknown_event.to_redis())
                 r.incr(METRICS_UNKNOWN_COUNT)
-                # Auto-trigger Browserbase research (no manual intervention)
+                # Auto-trigger image-based research via Claude/GPT vision
                 background_tasks.add_task(
                     _do_research,
                     track_id=matched_track.track_id,
@@ -423,7 +424,7 @@ def trigger_research(track_id: str, background_tasks: BackgroundTasks):
 
 def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                   yolo_confidence: float = 0.0):
-    """Background task: research an unknown object via Browserbase/YOLO fallback."""
+    """Background task: research an unknown object via vision APIs (Claude/GPT)."""
     try:
         from workers.research.researcher import research_object
         result = research_object(thumbnail_b64, yolo_hint, yolo_confidence=yolo_confidence)
@@ -542,6 +543,96 @@ def get_metrics_history():
             "event": "label_added",
         })
     return {"history": history}
+
+
+# Camera feed management
+camera_process = None
+
+@app.post("/camera/start")
+def start_camera(camera_id: int = 0, fps: float = 2.0):
+    """Start camera feed."""
+    import subprocess
+    global camera_process
+
+    if camera_process and camera_process.poll() is None:
+        return {"status": "already_running", "pid": camera_process.pid}
+
+    # Start jetson_client as subprocess
+    cmd = [
+        sys.executable,
+        "perception/jetson_client.py",
+        "--fallback",
+        "--no-depth",
+        "--camera", str(camera_id),
+        "--fps", str(fps),
+        "--confidence", "0.25",
+        "--backend", "http://localhost:8003",
+    ]
+
+    camera_process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=os.path.dirname(os.path.dirname(__file__))
+    )
+
+    return {"status": "started", "pid": camera_process.pid, "camera_id": camera_id}
+
+
+@app.post("/camera/stop")
+def stop_camera():
+    """Stop camera feed."""
+    global camera_process
+
+    if camera_process and camera_process.poll() is None:
+        camera_process.terminate()
+        camera_process.wait(timeout=5)
+        camera_process = None
+        return {"status": "stopped"}
+
+    return {"status": "not_running"}
+
+
+@app.get("/camera/status")
+def camera_status():
+    """Get camera feed status."""
+    global camera_process
+
+    if camera_process and camera_process.poll() is None:
+        return {"running": True, "pid": camera_process.pid}
+
+    return {"running": False}
+
+
+@app.websocket("/ws/detections")
+async def websocket_detections(websocket: WebSocket):
+    """Stream real-time detection results to frontend for live overlay."""
+    await websocket.accept()
+
+    # Track last seen message ID for each stream
+    last_id = "0-0"
+
+    try:
+        while True:
+            # Read new detections from the object stream
+            entries = r.xread({STREAM_VISION_OBJECTS: last_id}, count=10, block=100)
+
+            if entries:
+                for stream_name, messages in entries:
+                    for msg_id, data in messages:
+                        last_id = msg_id
+
+                        # Send detection data to frontend
+                        await websocket.send_json({
+                            "track_id": data.get(b"track_id", b"").decode() if isinstance(data.get(b"track_id"), bytes) else data.get("track_id", ""),
+                            "state": data.get(b"state", b"").decode() if isinstance(data.get(b"state"), bytes) else data.get("state", ""),
+                            "label": data.get(b"label", b"").decode() if isinstance(data.get(b"label"), bytes) else data.get("label", ""),
+                            "bbox": data.get(b"bbox", b"").decode() if isinstance(data.get(b"bbox"), bytes) else data.get("bbox", ""),
+                            "similarity": float(data.get(b"similarity", b"0").decode() if isinstance(data.get(b"similarity"), bytes) else data.get("similarity", "0")),
+                            "timestamp": float(data.get(b"timestamp", b"0").decode() if isinstance(data.get(b"timestamp"), bytes) else data.get("timestamp", "0")),
+                        })
+    except WebSocketDisconnect:
+        pass
 
 
 def start_server():

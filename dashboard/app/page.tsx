@@ -9,9 +9,13 @@ import {
   labelObject,
   researchObject,
   checkHealth,
+  startCamera,
+  stopCamera,
+  getCameraStatus,
 } from "@/lib/api";
+import CameraPreview from "@/components/CameraPreview";
 
-type Tab = "live" | "unknown" | "memory" | "metrics";
+type Tab = "camera" | "live" | "unknown" | "memory" | "metrics";
 
 interface ObjectEvent {
   track_id: string;
@@ -51,7 +55,7 @@ interface Metrics {
 }
 
 export default function Dashboard() {
-  const [tab, setTab] = useState<Tab>("live");
+  const [tab, setTab] = useState<Tab>("camera");
   const [objects, setObjects] = useState<ObjectEvent[]>([]);
   const [unknowns, setUnknowns] = useState<UnknownEvent[]>([]);
   const [labels, setLabels] = useState<LabelInfo[]>([]);
@@ -66,11 +70,16 @@ export default function Dashboard() {
   const [researchingTracks, setResearchingTracks] = useState<Set<string>>(
     new Set()
   );
+  const [cameraRunning, setCameraRunning] = useState(false);
+  const [cameraId, setCameraId] = useState(0);
 
   const refresh = useCallback(async () => {
     try {
       const health = await checkHealth();
       setOnline(health.status === "ok");
+
+      const camStatus = await getCameraStatus();
+      setCameraRunning(camStatus.running);
     } catch {
       setOnline(false);
       return;
@@ -134,6 +143,24 @@ export default function Dashboard() {
     }, 5000);
   };
 
+  const handleStartCamera = async () => {
+    try {
+      await startCamera(cameraId, 2.0);
+      setCameraRunning(true);
+    } catch (e) {
+      alert("Failed to start camera: " + (e as Error).message);
+    }
+  };
+
+  const handleStopCamera = async () => {
+    try {
+      await stopCamera();
+      setCameraRunning(false);
+    } catch (e) {
+      alert("Failed to stop camera: " + (e as Error).message);
+    }
+  };
+
   // Deduplicate objects by track_id (keep most recent)
   const uniqueObjects = objects.reduce<ObjectEvent[]>((acc, obj) => {
     if (!acc.find((o) => o.track_id === obj.track_id)) acc.push(obj);
@@ -149,21 +176,52 @@ export default function Dashboard() {
             Self-Improving Vision Agent
           </div>
         </div>
-        <div className="status">
-          <div className={`status-dot ${online ? "" : "offline"}`} />
-          {online ? "System Online" : "Offline"}
+        <div style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <select
+              value={cameraId}
+              onChange={(e) => setCameraId(Number(e.target.value))}
+              disabled={cameraRunning}
+              style={{
+                padding: "0.4rem",
+                borderRadius: "4px",
+                border: "1px solid var(--border)",
+                background: "var(--bg)",
+                color: "var(--text)",
+              }}
+            >
+              <option value={0}>Camera 0</option>
+              <option value={1}>Camera 1</option>
+              <option value={2}>Camera 2</option>
+            </select>
+            {!cameraRunning ? (
+              <button className="btn btn-primary" onClick={handleStartCamera}>
+                Start Camera
+              </button>
+            ) : (
+              <button className="btn" onClick={handleStopCamera}>
+                Stop Camera
+              </button>
+            )}
+          </div>
+          <div className="status">
+            <div className={`status-dot ${online ? "" : "offline"}`} />
+            {online ? "System Online" : "Offline"}
+          </div>
         </div>
       </div>
 
       <div className="tabs">
-        {(["live", "unknown", "memory", "metrics"] as Tab[]).map((t) => (
+        {(["camera", "live", "unknown", "memory", "metrics"] as Tab[]).map((t) => (
           <button
             key={t}
             className={`tab ${tab === t ? "active" : ""}`}
             onClick={() => setTab(t)}
           >
-            {t === "live"
-              ? "Live View"
+            {t === "camera"
+              ? "Camera"
+              : t === "live"
+              ? "Detections"
               : t === "unknown"
               ? `Unknown Queue (${unknowns.length})`
               : t === "memory"
@@ -172,6 +230,13 @@ export default function Dashboard() {
           </button>
         ))}
       </div>
+
+      {/* Camera Preview */}
+      {tab === "camera" && (
+        <div>
+          <CameraPreview />
+        </div>
+      )}
 
       {/* Live View */}
       {tab === "live" && (

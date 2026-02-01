@@ -68,3 +68,25 @@ export async function checkHealth() {
   const res = await fetch(`${API_BASE}/health`);
   return res.json();
 }
+
+export async function startCamera(cameraId = 0, fps = 2.0) {
+  const res = await fetch(`${API_BASE}/camera/start?camera_id=${cameraId}&fps=${fps}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to start camera");
+  return res.json();
+}
+
+export async function stopCamera() {
+  const res = await fetch(`${API_BASE}/camera/stop`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to stop camera");
+  return res.json();
+}
+
+export async function getCameraStatus() {
+  const res = await fetch(`${API_BASE}/camera/status`);
+  if (!res.ok) throw new Error("Failed to get camera status");
+  return res.json();
+}
