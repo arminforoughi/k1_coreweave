@@ -5,7 +5,7 @@
 # transport to localhost UDP + shared memory.  Without loading this profile
 # our subscriber can *discover* topics but never receives any frames.
 
-set -euo pipefail
+set -eo pipefail
 
 export FASTRTPS_DEFAULT_PROFILES_FILE=/opt/booster/BoosterRos2/fastdds_profile.xml
 source /opt/ros/humble/setup.bash
