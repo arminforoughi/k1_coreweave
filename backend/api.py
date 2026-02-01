@@ -269,7 +269,7 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
             depth_value=det.depth_value,
             crop_quality=det.crop_quality,
         )
-        r.xadd(STREAM_VISION_OBJECTS, event.to_redis(), maxlen=1000)
+        r.xadd(STREAM_VISION_OBJECTS, event.to_redis())
 
         # Update metrics
         r.incr(METRICS_TOTAL_QUERIES)
@@ -383,7 +383,7 @@ def label_object(req: LabelRequest):
         label_name=req.label_name,
         label_id=label_id,
     )
-    r.xadd(STREAM_VISION_LABELS, label_event.to_redis(), maxlen=500)
+    r.xadd(STREAM_VISION_LABELS, label_event.to_redis())
 
     return {
         "label_id": label_id,
@@ -447,7 +447,7 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                             label_name=label_name,
                             label_id=label_id,
                         )
-                        r.xadd(STREAM_VISION_LABELS, label_event.to_redis(), maxlen=500)
+                        r.xadd(STREAM_VISION_LABELS, label_event.to_redis())
 
                         # Store research result
                         r.xadd(STREAM_VISION_RESEARCHED, {
@@ -458,7 +458,7 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                             "source": result.get("source", ""),
                             "auto_labeled": "true",
                             "timestamp": str(time.time()),
-                        }, maxlen=500)
+                        })
                     break
         else:
             # Low confidence — put in queue for manual review
@@ -469,7 +469,7 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                 "description": result.get("description", "") if result else "",
                 "auto_labeled": "false",
                 "timestamp": str(time.time()),
-            }, maxlen=500)
+            })
 
     except ImportError:
         print(f"Research worker not available for track {track_id}")
