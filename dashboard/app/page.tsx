@@ -6,6 +6,7 @@ import {
   fetchUnknowns,
   fetchMemory,
   fetchMetrics,
+  fetchResearched,
   labelObject,
   researchObject,
   checkHealth,
@@ -16,7 +17,7 @@ import {
 import CameraPreview from "@/components/CameraPreview";
 import VoiceChat from "@/components/VoiceChat";
 
-type Tab = "camera" | "voice" | "live" | "unknown" | "memory" | "metrics";
+type Tab = "camera" | "voice" | "live" | "unknown" | "learned" | "metrics";
 
 interface ObjectEvent {
   track_id: string;
@@ -45,6 +46,25 @@ interface LabelInfo {
   created_at: number;
 }
 
+interface ResearchedEvent {
+  track_id: string;
+  label: string;
+  confidence: number;
+  source: string;
+  description: string;
+  facts: string[];
+  thumbnail_b64: string;
+  manufacturer: string | null;
+  price: string | null;
+  specs: string[];
+  safety_info: string | null;
+  web_description: string | null;
+  product_url: string | null;
+  search_sources: string[];
+  timestamp: string;
+  stream_id: string;
+}
+
 interface Metrics {
   unknown_count: number;
   known_count: number;
@@ -71,6 +91,8 @@ export default function Dashboard() {
   const [researchingTracks, setResearchingTracks] = useState<Set<string>>(
     new Set()
   );
+  const [researched, setResearched] = useState<ResearchedEvent[]>([]);
+  const [expandedCard, setExpandedCard] = useState<string | null>(null);
   const [cameraRunning, setCameraRunning] = useState(false);
   const [cameraId, setCameraId] = useState(0);
 
@@ -93,9 +115,13 @@ export default function Dashboard() {
       } else if (tab === "unknown") {
         const data = await fetchUnknowns();
         setUnknowns(data.events || []);
-      } else if (tab === "memory") {
-        const data = await fetchMemory();
-        setLabels(data.labels || []);
+      } else if (tab === "learned") {
+        const [memData, resData] = await Promise.all([
+          fetchMemory(),
+          fetchResearched(),
+        ]);
+        setLabels(memData.labels || []);
+        setResearched(resData.events || []);
       } else if (tab === "metrics") {
         const data = await fetchMetrics();
         setMetrics(data);
@@ -172,7 +198,7 @@ export default function Dashboard() {
     <div className="container">
       <div className="header">
         <div>
-          <h1>OpenClawdIRL</h1>
+          <h1>Jimmy 2.0</h1>
           <div style={{ fontSize: "0.8rem", color: "var(--text-dim)" }}>
             Self-Improving Vision Agent
           </div>
@@ -213,7 +239,7 @@ export default function Dashboard() {
       </div>
 
       <div className="tabs">
-        {(["camera", "voice", "live", "unknown", "memory", "metrics"] as Tab[]).map((t) => (
+        {(["camera", "voice", "live", "unknown", "learned", "metrics"] as Tab[]).map((t) => (
           <button
             key={t}
             className={`tab ${tab === t ? "active" : ""}`}
@@ -227,8 +253,8 @@ export default function Dashboard() {
               ? "Detections"
               : t === "unknown"
               ? `Unknown Queue (${unknowns.length})`
-              : t === "memory"
-              ? "Object Memory"
+              : t === "learned"
+              ? "Learned Objects"
               : "Metrics"}
           </button>
         ))}
@@ -404,32 +430,199 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Object Memory */}
-      {tab === "memory" && (
+      {/* Learned Objects */}
+      {tab === "learned" && (
         <div>
-          {labels.length === 0 ? (
+          {labels.length === 0 && researched.length === 0 ? (
             <div className="empty-state">
               <p>
                 No objects learned yet. Teach the system by labeling unknown
-                objects, or let Browserbase research them automatically.
+                objects, or let auto-research identify them via vision AI + web search.
               </p>
             </div>
           ) : (
-            <div className="grid grid-3">
-              {labels.map((l) => (
-                <div key={l.label_id} className="card">
-                  <h3>{l.name}</h3>
-                  <div className="meta">
-                    {l.n_examples} exemplar{l.n_examples !== 1 ? "s" : ""}{" "}
-                    stored
+            <>
+              {/* Researched objects with full detail cards */}
+              {researched.length > 0 && (
+                <div className="learned-section">
+                  <div className="section-header">
+                    <h2>Auto-Researched Objects</h2>
+                    <span className="section-count">{researched.length}</span>
                   </div>
-                  <div className="meta">
-                    Learned:{" "}
-                    {new Date(l.created_at * 1000).toLocaleTimeString()}
+                  <div className="research-grid">
+                    {researched.map((r) => {
+                      const isExpanded = expandedCard === r.track_id;
+                      return (
+                        <div
+                          key={r.track_id}
+                          className={`research-card ${isExpanded ? "expanded" : ""}`}
+                          onClick={() =>
+                            setExpandedCard(isExpanded ? null : r.track_id)
+                          }
+                        >
+                          <div className="research-card-header">
+                            {r.thumbnail_b64 && (
+                              <img
+                                className="research-thumb"
+                                src={`data:image/jpeg;base64,${r.thumbnail_b64}`}
+                                alt={r.label}
+                              />
+                            )}
+                            <div className="research-summary">
+                              <h3>{r.label}</h3>
+                              <div className="research-badges">
+                                <span className="badge badge-known">
+                                  {(r.confidence * 100).toFixed(0)}% conf
+                                </span>
+                                <span className="badge badge-source">
+                                  {r.source}
+                                </span>
+                              </div>
+                              {r.description && (
+                                <p className="research-desc">{r.description}</p>
+                              )}
+                            </div>
+                            <div className="expand-icon">
+                              {isExpanded ? "▲" : "▼"}
+                            </div>
+                          </div>
+
+                          {isExpanded && (
+                            <div
+                              className="research-details"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {/* Facts */}
+                              {r.facts && r.facts.length > 0 && (
+                                <div className="detail-section">
+                                  <h4>Key Facts</h4>
+                                  <ul className="facts-list">
+                                    {r.facts.map((f, i) => (
+                                      <li key={i}>{f}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+
+                              {/* Product Info */}
+                              {(r.manufacturer || r.price) && (
+                                <div className="detail-section">
+                                  <h4>Product Info</h4>
+                                  <div className="detail-grid">
+                                    {r.manufacturer && (
+                                      <div className="detail-item">
+                                        <span className="detail-label">Manufacturer</span>
+                                        <span className="detail-value">{r.manufacturer}</span>
+                                      </div>
+                                    )}
+                                    {r.price && (
+                                      <div className="detail-item">
+                                        <span className="detail-label">Price</span>
+                                        <span className="detail-value price">{r.price}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Specs */}
+                              {r.specs && r.specs.length > 0 && (
+                                <div className="detail-section">
+                                  <h4>Specifications</h4>
+                                  <div className="specs-list">
+                                    {r.specs.map((s, i) => (
+                                      <div key={i} className="spec-chip">{s}</div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Web Description */}
+                              {r.web_description && (
+                                <div className="detail-section">
+                                  <h4>Web Description</h4>
+                                  <p className="web-desc">{r.web_description}</p>
+                                </div>
+                              )}
+
+                              {/* Safety Info */}
+                              {r.safety_info && (
+                                <div className="detail-section safety-section">
+                                  <h4>Safety Information</h4>
+                                  <p className="safety-text">{r.safety_info}</p>
+                                </div>
+                              )}
+
+                              {/* Links */}
+                              {(r.product_url || (r.search_sources && r.search_sources.length > 0)) && (
+                                <div className="detail-section">
+                                  <h4>Sources</h4>
+                                  <div className="source-links">
+                                    {r.product_url && (
+                                      <a
+                                        href={r.product_url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="source-link"
+                                      >
+                                        Product Page ↗
+                                      </a>
+                                    )}
+                                    {r.search_sources &&
+                                      r.search_sources
+                                        .filter((s) => s !== r.product_url)
+                                        .map((s, i) => (
+                                          <a
+                                            key={i}
+                                            href={s}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="source-link"
+                                          >
+                                            Source {i + 1} ↗
+                                          </a>
+                                        ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="detail-meta">
+                                Track: {r.track_id} · {new Date(r.timestamp).toLocaleString()}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
-              ))}
-            </div>
+              )}
+
+              {/* KNN Labels (manually taught + auto-embedded) */}
+              {labels.length > 0 && (
+                <div className="learned-section">
+                  <div className="section-header">
+                    <h2>KNN Memory Labels</h2>
+                    <span className="section-count">{labels.length}</span>
+                  </div>
+                  <div className="grid grid-3">
+                    {labels.map((l) => (
+                      <div key={l.label_id} className="card label-card">
+                        <h3>{l.name}</h3>
+                        <div className="meta">
+                          {l.n_examples} exemplar{l.n_examples !== 1 ? "s" : ""}{" "}
+                          stored
+                        </div>
+                        <div className="meta">
+                          Learned:{" "}
+                          {new Date(l.created_at * 1000).toLocaleTimeString()}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

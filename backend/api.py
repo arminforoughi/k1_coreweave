@@ -59,6 +59,24 @@ print("Loading MobileNetV2 embedder...")
 embedder = Embedder()
 print(f"Embedder loaded (dim={embedder.dim}, device={embedder.device})")
 
+# Ensure vector index exists (auto-create if missing, e.g. after FLUSHALL)
+try:
+    r.execute_command("FT.INFO", "idx:embeddings")
+except Exception:
+    print("Vector index missing — creating idx:embeddings...")
+    r.execute_command(
+        "FT.CREATE", "idx:embeddings",
+        "ON", "JSON",
+        "PREFIX", "1", "emb:",
+        "SCHEMA",
+        "$.label_id", "AS", "label_id", "TAG",
+        "$.label_name", "AS", "label_name", "TEXT",
+        "$.created_at", "AS", "created_at", "NUMERIC",
+        "$.vector", "AS", "vector", "VECTOR", "FLAT", "6",
+        "TYPE", "FLOAT32", "DIM", str(embedder.dim), "DISTANCE_METRIC", "COSINE",
+    )
+    print("Vector index created.")
+
 # Init memory and gating
 memory = VectorMemory(r_binary, embedding_dim=embedder.dim)
 gating = GatingLogic(
@@ -68,7 +86,7 @@ gating = GatingLogic(
 )
 
 # Track state (for cooldown and persistence tracking across frames)
-tracker = SimpleTracker(iou_threshold=0.3, max_age=5.0)
+tracker = SimpleTracker(iou_threshold=0.2, max_age=10.0)
 
 app = FastAPI(title="OpenClawdIRL API", version="0.2.0")
 
@@ -104,36 +122,42 @@ def gate_decision_op(
     crop_quality: float = None,
     prefilter_action: str = None,
 ) -> dict:
-    """Gate detections: YOLO is primary, KNN supplements with learned objects.
+    """Gate detections: KNN determines state, YOLO provides a hint.
 
     Logic:
-    - YOLO is always trusted for its 80 COCO classes.
-    - KNN only overrides when it has a high-confidence match to a LEARNED label
-      (i.e. something not in YOLO's vocabulary, added via research/teach).
-    - "known" = YOLO confident OR KNN has strong learned match
-    - "unknown" = YOLO low confidence AND KNN has no match → triggers research
+    - If the object is NOT in the KNN → it's "unknown" regardless of YOLO.
+      YOLO's class is just a hint passed to research for context.
+    - If the object IS in the KNN with a strong match → "known" with the
+      learned label. The system has verified this object before.
+    - "uncertain" = KNN has a moderate match but not confident enough.
+    - This ensures every new object triggers research, even if YOLO
+      confidently misclassifies it (e.g., robot → "airplane").
     """
-    knn_state, knn_label, knn_similarity = gating.decide(matches)
-
-    # YOLO is the primary detector — always use its label and confidence
-    label = yolo_class
-    confidence = yolo_confidence
-
-    # Determine state based on YOLO confidence
-    if yolo_confidence >= 0.5:
-        state = "known"
-    elif yolo_confidence >= 0.25:
-        state = "uncertain"
+    # Look at raw KNN matches directly — top match similarity and label
+    if matches:
+        knn_similarity = matches[0]["similarity"]
+        knn_label = matches[0]["label_name"]
     else:
-        state = "unknown"
+        knn_similarity = 0.0
+        knn_label = None
 
-    # KNN override: only if KNN found a strong match to a LEARNED label
-    # (a label that was added via research/teach, not a YOLO class)
-    if knn_state == "known" and knn_label and knn_similarity >= 0.8:
-        # KNN is very confident — use the learned label instead
+    # KNN determines the state — it represents our verified knowledge.
+    # If the KNN has a strong match (similarity >= 0.7), the object is known
+    # regardless of margin — we've seen something very similar before.
+    # Otherwise, the object is unknown and needs research.
+    if knn_label and knn_similarity >= 0.7:
+        state = "known"
         label = knn_label
         confidence = knn_similarity
-        state = "known"
+    elif knn_label and knn_similarity >= 0.5:
+        state = "uncertain"
+        label = knn_label
+        confidence = knn_similarity
+    else:
+        # Not in KNN or weak match → unknown, use YOLO class as display hint
+        state = "unknown"
+        label = yolo_class
+        confidence = yolo_confidence
 
     return {
         "state": state,
@@ -272,6 +296,7 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
         matched_track.similarity = similarity
 
         # Publish object event to Redis stream
+        # Include embedding for unknown objects (needed for research/learning)
         event = ObjectEvent(
             track_id=matched_track.track_id,
             bbox=det.bbox,
@@ -292,8 +317,11 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
         if state == "known":
             r.incr(METRICS_KNOWN_COUNT)
 
-        # Unknown gating with cooldown + persistence
-        if state == "unknown" and matched_track.frames_seen >= config.perception.persistence_frames:
+        # Research trigger: anything NOT confidently known should be researched.
+        # "unknown" = no KNN match, "uncertain" = weak KNN match (unreliable).
+        # Both need research — e.g. a tissue box getting 60% sim to a Spot robot
+        # doesn't mean it IS a Spot. Research will confirm or identify the real object.
+        if state in ("unknown", "uncertain") and matched_track.frames_seen >= config.perception.persistence_frames:
             if now > matched_track.cooldown_until:
                 matched_track.cooldown_until = now + config.perception.cooldown_seconds
                 unknown_event = UnknownEvent(
@@ -358,6 +386,31 @@ def get_unknown_events(count: int = 50):
         events = []
         for entry_id, data in entries:
             data["stream_id"] = entry_id
+            events.append(data)
+        return {"events": events}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/events/researched")
+def get_researched_events(count: int = 50):
+    """Get recent research results with enrichment data."""
+    try:
+        entries = r.xrevrange(STREAM_VISION_RESEARCHED, count=count)
+        events = []
+        for entry_id, data in entries:
+            data["stream_id"] = entry_id
+            # Parse JSON fields back
+            if data.get("specs"):
+                try:
+                    data["specs"] = json.loads(data["specs"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if data.get("search_sources"):
+                try:
+                    data["search_sources"] = json.loads(data["search_sources"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
             events.append(data)
         return {"events": events}
     except Exception as e:
@@ -470,8 +523,8 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                         )
                         r.xadd(STREAM_VISION_LABELS, label_event.to_redis())
 
-                        # Store research result
-                        r.xadd(STREAM_VISION_RESEARCHED, {
+                        # Store research result with enrichment data
+                        research_data = {
                             "track_id": track_id,
                             "label": label_name,
                             "confidence": str(result["confidence"]),
@@ -479,7 +532,23 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                             "source": result.get("source", ""),
                             "auto_labeled": "true",
                             "timestamp": str(time.time()),
-                        })
+                        }
+                        # Add Browserbase enrichment fields if present
+                        if result.get("manufacturer"):
+                            research_data["manufacturer"] = result["manufacturer"]
+                        if result.get("price"):
+                            research_data["price"] = result["price"]
+                        if result.get("specs"):
+                            research_data["specs"] = json.dumps(result["specs"])
+                        if result.get("safety_info"):
+                            research_data["safety_info"] = result["safety_info"]
+                        if result.get("web_description"):
+                            research_data["web_description"] = result["web_description"]
+                        if result.get("product_url"):
+                            research_data["product_url"] = result["product_url"]
+                        if result.get("search_sources"):
+                            research_data["search_sources"] = json.dumps(result["search_sources"])
+                        r.xadd(STREAM_VISION_RESEARCHED, research_data)
                     break
         else:
             # Low confidence — put in queue for manual review

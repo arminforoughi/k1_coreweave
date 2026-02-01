@@ -26,7 +26,7 @@ class PerceptionConfig:
     known_threshold: float = field(default_factory=lambda: float(os.getenv("KNOWN_THRESHOLD", "0.7")))
     margin_threshold: float = field(default_factory=lambda: float(os.getenv("MARGIN_THRESHOLD", "0.15")))
     cooldown_seconds: float = field(default_factory=lambda: float(os.getenv("COOLDOWN_SECONDS", "15")))
-    persistence_frames: int = field(default_factory=lambda: int(os.getenv("PERSISTENCE_FRAMES", "10")))
+    persistence_frames: int = field(default_factory=lambda: int(os.getenv("PERSISTENCE_FRAMES", "3")))
     # Jetson pre-filter gate thresholds
     depth_min: float = field(default_factory=lambda: float(os.getenv("DEPTH_MIN", "0.08")))
     depth_max: float = field(default_factory=lambda: float(os.getenv("DEPTH_MAX", "0.95")))
