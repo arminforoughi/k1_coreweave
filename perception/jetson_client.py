@@ -421,6 +421,8 @@ def main():
     parser.add_argument("--midas-model", default="small",
                         choices=["small", "hybrid", "large"],
                         help="MiDaS model size (default: small)")
+    parser.add_argument("--fallback", action="store_true",
+                        help="Force cv2.VideoCapture fallback (skip ROS 2)")
     # Pre-filter thresholds (can also be set via env vars)
     parser.add_argument("--depth-min", type=float, default=0.08)
     parser.add_argument("--depth-max", type=float, default=0.95)
@@ -436,7 +438,7 @@ def main():
         "confidence_floor": args.confidence,
     }
 
-    if HAS_ROS2:
+    if HAS_ROS2 and not args.fallback:
         rclpy.init()
         node = JetsonClientNode(
             backend_url=args.backend,

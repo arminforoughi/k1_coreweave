@@ -24,10 +24,10 @@ redis:
 
 # ===== JETSON (thin client only) =====
 
-# Run the Jetson client (camera + YOLO + POST to backend)
+# Run the Jetson client with cv2 camera (fallback, no ROS 2)
 # Usage: make jetson-client BACKEND=http://<laptop-ip>:8000
 jetson-client:
-	python perception/jetson_client.py --backend $(BACKEND)
+	python perception/jetson_client.py --backend $(BACKEND) --fallback
 
 # Run the Jetson client with ROS 2 camera topic + MiDaS depth
 # Usage: make jetson-ros BACKEND=http://<laptop-ip>:8000
