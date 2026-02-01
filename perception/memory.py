@@ -104,12 +104,16 @@ class VectorMemory:
             for key in keys:
                 data = self.r.hgetall(key)
                 if data:
-                    label_id = key.replace("label:", "")
+                    key_str = key.decode() if isinstance(key, bytes) else key
+                    label_id = key_str.replace("label:", "")
+                    # Decode bytes values from binary redis client
+                    def _dec(v):
+                        return v.decode() if isinstance(v, bytes) else v
                     labels.append({
                         "label_id": label_id,
-                        "name": data.get("name", ""),
-                        "n_examples": int(data.get("n_examples", 0)),
-                        "created_at": float(data.get("created_at", 0)),
+                        "name": _dec(data.get(b"name", data.get("name", ""))),
+                        "n_examples": int(_dec(data.get(b"n_examples", data.get("n_examples", 0)))),
+                        "created_at": float(_dec(data.get(b"created_at", data.get("created_at", 0)))),
                     })
             if cursor == 0:
                 break
@@ -118,8 +122,17 @@ class VectorMemory:
     def get_memory_count(self) -> int:
         """Count total embeddings in memory."""
         try:
-            info = self.r.ft(VECTOR_INDEX_NAME).info()
-            return int(info.get("num_docs", 0))
+            result = self.r.execute_command("FT.INFO", VECTOR_INDEX_NAME)
+            # Result is a flat list: [key, value, key, value, ...]
+            if isinstance(result, list):
+                for i in range(0, len(result) - 1, 2):
+                    k = result[i]
+                    if isinstance(k, bytes):
+                        k = k.decode()
+                    if k == "num_docs":
+                        v = result[i + 1]
+                        return int(v.decode() if isinstance(v, bytes) else v)
+            return 0
         except Exception:
             return 0
 
