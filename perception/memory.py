@@ -168,6 +168,7 @@ class GatingLogic:
         if s1 >= self.known_threshold and margin >= self.margin_threshold:
             return "known", top_label, s1
         elif s1 >= self.unknown_threshold:
-            return "uncertain", top_label, s1
+            # Uncertain: return None so backend uses YOLO class, not weak KNN match
+            return "uncertain", None, s1
         else:
             return "unknown", None, s1

@@ -27,44 +27,51 @@ export default function CameraPreview({ onDeviceChange }: CameraPreviewProps) {
   const [detections, setDetections] = useState<Detection[]>([]);
   const fpsCounterRef = useRef({ frames: 0, lastTime: Date.now() });
 
-  // Connect to WebSocket for live detections
+  // Poll for detections via HTTP (simpler than WebSocket with Redis streams)
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:8003/ws/detections");
+    const pollDetections = async () => {
+      try {
+        const response = await fetch("http://localhost:8003/events/objects?count=20");
+        const data = await response.json();
 
-    ws.onopen = () => {
-      console.log("WebSocket connected");
-    };
+        if (data.events && data.events.length > 0) {
+          const now = Date.now() / 1000;
+          const trackMap = new Map<string, Detection>();  // Deduplicate by track_id
 
-    ws.onmessage = (event) => {
-      const detection: Detection = JSON.parse(event.data);
-      setDetections((prev) => {
-        // Keep only recent detections (last 2 seconds)
-        const now = Date.now() / 1000;
-        const recent = prev.filter((d) => now - d.timestamp < 2);
+          // Convert events to Detection format and filter recent ones
+          for (const event of data.events) {
+            const timestamp = parseFloat(event.timestamp || "0");
+            if (now - timestamp < 2) {  // Only show last 2 seconds
+              const detection: Detection = {
+                track_id: event.track_id,
+                state: event.state as "known" | "uncertain" | "unknown",
+                label: event.label || event.state,
+                bbox: event.bbox,
+                similarity: parseFloat(event.similarity || "0"),
+                timestamp: timestamp,
+              };
 
-        // Update or add detection
-        const existing = recent.findIndex((d) => d.track_id === detection.track_id);
-        if (existing >= 0) {
-          recent[existing] = detection;
-          return recent;
-        } else {
-          return [...recent, detection];
+              // Keep only newest per track_id
+              if (!trackMap.has(detection.track_id) ||
+                  trackMap.get(detection.track_id)!.timestamp < timestamp) {
+                trackMap.set(detection.track_id, detection);
+              }
+            }
+          }
+
+          setDetections(Array.from(trackMap.values()));
         }
-      });
+      } catch (err) {
+        console.error("Failed to poll detections:", err);
+      }
     };
 
-    ws.onerror = (err) => {
-      console.error("WebSocket error:", err);
-    };
-
-    ws.onclose = () => {
-      console.log("WebSocket disconnected");
-    };
-
-    wsRef.current = ws;
+    // Poll every 500ms
+    const interval = setInterval(pollDetections, 500);
+    pollDetections(); // Initial fetch
 
     return () => {
-      ws.close();
+      clearInterval(interval);
     };
   }, []);
 
@@ -271,7 +278,60 @@ export default function CameraPreview({ onDeviceChange }: CameraPreviewProps) {
         }}
       >
         <strong>Note:</strong> This is a live browser preview of your selected camera.
-        Click "Start Camera" in the header to send this feed to the backend for object detection.
+        The backend is running YOLO on a separate camera feed.
+      </div>
+
+      {/* Live Detection List */}
+      <div
+        style={{
+          marginTop: "1rem",
+          padding: "1rem",
+          background: "var(--card-bg)",
+          borderRadius: "4px",
+        }}
+      >
+        <h3 style={{ margin: "0 0 0.5rem 0", fontSize: "1rem" }}>
+          Recent Detections ({detections.length})
+        </h3>
+        {detections.length === 0 ? (
+          <div style={{ color: "var(--text-dim)", fontSize: "0.85rem" }}>
+            No recent detections. Point camera at objects (person, laptop, cup, phone, etc.)
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            {detections.map((det) => {
+              let bgColor = "#00ff0020"; // green
+              let borderColor = "#00ff00";
+              if (det.state === "uncertain") {
+                bgColor = "#ffff0020"; // yellow
+                borderColor = "#ffff00";
+              } else if (det.state === "unknown") {
+                bgColor = "#ff000020"; // red
+                borderColor = "#ff0000";
+              }
+
+              return (
+                <div
+                  key={det.track_id}
+                  style={{
+                    padding: "0.5rem",
+                    background: bgColor,
+                    border: `2px solid ${borderColor}`,
+                    borderRadius: "4px",
+                    fontSize: "0.85rem",
+                  }}
+                >
+                  <div style={{ fontWeight: "bold" }}>
+                    {det.label} ({(det.similarity * 100).toFixed(0)}%)
+                  </div>
+                  <div style={{ fontSize: "0.75rem", color: "var(--text-dim)", marginTop: "0.25rem" }}>
+                    {det.state.toUpperCase()} · Track {det.track_id}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

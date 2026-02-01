@@ -106,6 +106,11 @@ def gate_decision_op(
     """Decide known/uncertain/unknown using KNN + YOLO + depth signals."""
     state, label, similarity = gating.decide(matches)
 
+    # If gating returned None for label, use YOLO class
+    # (happens for "uncertain" and "unknown" states)
+    if label is None:
+        label = yolo_class
+
     # If KNN has no opinion but YOLO is very confident, trust YOLO
     if state == "unknown" and yolo_confidence >= 0.75:
         state = "uncertain"
@@ -549,7 +554,7 @@ def get_metrics_history():
 camera_process = None
 
 @app.post("/camera/start")
-def start_camera(camera_id: int = 0, fps: float = 2.0):
+def start_camera(camera_id: int = 0, fps: float = 2.0, confidence: float = 0.15):
     """Start camera feed."""
     import subprocess
     global camera_process
@@ -565,7 +570,7 @@ def start_camera(camera_id: int = 0, fps: float = 2.0):
         "--no-depth",
         "--camera", str(camera_id),
         "--fps", str(fps),
-        "--confidence", "0.25",
+        "--confidence", str(confidence),
         "--backend", "http://localhost:8003",
     ]
 
@@ -607,20 +612,26 @@ def camera_status():
 @app.websocket("/ws/detections")
 async def websocket_detections(websocket: WebSocket):
     """Stream real-time detection results to frontend for live overlay."""
+    import asyncio
+
     await websocket.accept()
 
     # Track last seen message ID for each stream
-    last_id = "0-0"
+    last_id = ["0-0"]  # Use list for mutability in closure
+
+    def read_stream():
+        """Blocking Redis read in thread."""
+        return r.xread({STREAM_VISION_OBJECTS: last_id[0]}, count=10, block=100)
 
     try:
         while True:
-            # Read new detections from the object stream
-            entries = r.xread({STREAM_VISION_OBJECTS: last_id}, count=10, block=100)
+            # Read new detections from the object stream (in thread to avoid blocking)
+            entries = await asyncio.to_thread(read_stream)
 
             if entries:
                 for stream_name, messages in entries:
                     for msg_id, data in messages:
-                        last_id = msg_id
+                        last_id[0] = msg_id
 
                         # Send detection data to frontend
                         await websocket.send_json({
