@@ -15,7 +15,12 @@ Dependencies (on Jetson):
 """
 import argparse
 import base64
+import os
+import sys
 import time
+
+# Ensure project root is on sys.path so `from perception.*` and `from shared.*` resolve
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import cv2
 import numpy as np
@@ -227,9 +232,9 @@ class JetsonClientNode(Node):
         else:
             self.get_logger().warn("Depth estimator not available. Running without depth.")
 
-        # ROS 2 camera subscription (latest-only to avoid queue buildup)
+        # ROS 2 camera subscription — match publisher QoS (RELIABLE on K1)
         qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )

@@ -31,8 +31,9 @@ jetson-client:
 
 # Run the Jetson client with ROS 2 camera topic + MiDaS depth
 # Usage: make jetson-ros BACKEND=http://<laptop-ip>:8000
+# Note: ROS 2 mode is auto-detected when rclpy is available
 jetson-ros:
-	python perception/jetson_client.py --backend $(BACKEND) --ros
+	source /opt/ros/humble/setup.bash && python perception/jetson_client.py --backend $(BACKEND)
 
 # Install Jetson-only dependencies
 jetson-setup:
