@@ -188,11 +188,21 @@ export default function Dashboard() {
     }
   };
 
-  // Deduplicate objects by track_id (keep most recent)
-  const uniqueObjects = objects.reduce<ObjectEvent[]>((acc, obj) => {
-    if (!acc.find((o) => o.track_id === obj.track_id)) acc.push(obj);
-    return acc;
-  }, []);
+  // Deduplicate objects by track_id (keep most recent per track)
+  const uniqueObjects = Object.values(
+    objects.reduce<Record<string, ObjectEvent>>((acc, obj) => {
+      if (!acc[obj.track_id]) acc[obj.track_id] = obj;
+      return acc;
+    }, {})
+  );
+
+  // Deduplicate researched by label (keep most recent per label)
+  const uniqueResearched = Object.values(
+    researched.reduce<Record<string, ResearchedEvent>>((acc, r) => {
+      if (!acc[r.label]) acc[r.label] = r;
+      return acc;
+    }, {})
+  );
 
   return (
     <div className="container">
@@ -433,7 +443,7 @@ export default function Dashboard() {
       {/* Learned Objects */}
       {tab === "learned" && (
         <div>
-          {labels.length === 0 && researched.length === 0 ? (
+          {labels.length === 0 && uniqueResearched.length === 0 ? (
             <div className="empty-state">
               <p>
                 No objects learned yet. Teach the system by labeling unknown
@@ -443,21 +453,21 @@ export default function Dashboard() {
           ) : (
             <>
               {/* Researched objects with full detail cards */}
-              {researched.length > 0 && (
+              {uniqueResearched.length > 0 && (
                 <div className="learned-section">
                   <div className="section-header">
                     <h2>Auto-Researched Objects</h2>
-                    <span className="section-count">{researched.length}</span>
+                    <span className="section-count">{uniqueResearched.length}</span>
                   </div>
                   <div className="research-grid">
-                    {researched.map((r) => {
-                      const isExpanded = expandedCard === r.track_id;
+                    {uniqueResearched.map((r) => {
+                      const isExpanded = expandedCard === r.label;
                       return (
                         <div
-                          key={r.track_id}
+                          key={r.label}
                           className={`research-card ${isExpanded ? "expanded" : ""}`}
                           onClick={() =>
-                            setExpandedCard(isExpanded ? null : r.track_id)
+                            setExpandedCard(isExpanded ? null : r.label)
                           }
                         >
                           <div className="research-card-header">
@@ -472,7 +482,7 @@ export default function Dashboard() {
                               <h3>{r.label}</h3>
                               <div className="research-badges">
                                 <span className="badge badge-known">
-                                  {(r.confidence * 100).toFixed(0)}% conf
+                                  {(parseFloat(String(r.confidence)) * 100).toFixed(0)}% conf
                                 </span>
                                 <span className="badge badge-source">
                                   {r.source}
@@ -587,7 +597,7 @@ export default function Dashboard() {
                               )}
 
                               <div className="detail-meta">
-                                Track: {r.track_id} · {new Date(r.timestamp).toLocaleString()}
+                                Track: {r.track_id} · {new Date(parseFloat(String(r.timestamp)) * 1000).toLocaleString()}
                               </div>
                             </div>
                           )}

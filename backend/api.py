@@ -406,6 +406,11 @@ def get_researched_events(count: int = 50):
                     data["specs"] = json.loads(data["specs"])
                 except (json.JSONDecodeError, TypeError):
                     pass
+            if data.get("facts"):
+                try:
+                    data["facts"] = json.loads(data["facts"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
             if data.get("search_sources"):
                 try:
                     data["search_sources"] = json.loads(data["search_sources"])
@@ -532,7 +537,10 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                             "source": result.get("source", ""),
                             "auto_labeled": "true",
                             "timestamp": str(time.time()),
+                            "thumbnail_b64": thumbnail_b64,
                         }
+                        if result.get("facts"):
+                            research_data["facts"] = json.dumps(result["facts"])
                         # Add Browserbase enrichment fields if present
                         if result.get("manufacturer"):
                             research_data["manufacturer"] = result["manufacturer"]
@@ -559,6 +567,7 @@ def _do_research(track_id: str, thumbnail_b64: str, yolo_hint: str,
                 "description": result.get("description", "") if result else "",
                 "auto_labeled": "false",
                 "timestamp": str(time.time()),
+                "thumbnail_b64": thumbnail_b64,
             })
 
     except ImportError:
