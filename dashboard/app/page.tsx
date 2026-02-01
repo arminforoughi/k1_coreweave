@@ -14,8 +14,9 @@ import {
   getCameraStatus,
 } from "@/lib/api";
 import CameraPreview from "@/components/CameraPreview";
+import VoiceChat from "@/components/VoiceChat";
 
-type Tab = "camera" | "live" | "unknown" | "memory" | "metrics";
+type Tab = "camera" | "voice" | "live" | "unknown" | "memory" | "metrics";
 
 interface ObjectEvent {
   track_id: string;
@@ -212,14 +213,16 @@ export default function Dashboard() {
       </div>
 
       <div className="tabs">
-        {(["camera", "live", "unknown", "memory", "metrics"] as Tab[]).map((t) => (
+        {(["camera", "voice", "live", "unknown", "memory", "metrics"] as Tab[]).map((t) => (
           <button
             key={t}
             className={`tab ${tab === t ? "active" : ""}`}
             onClick={() => setTab(t)}
           >
             {t === "camera"
-              ? "Camera"
+              ? "📷 Camera"
+              : t === "voice"
+              ? "🎤 Voice"
               : t === "live"
               ? "Detections"
               : t === "unknown"
@@ -235,6 +238,16 @@ export default function Dashboard() {
       {tab === "camera" && (
         <div>
           <CameraPreview />
+        </div>
+      )}
+
+      {/* Voice Chat */}
+      {tab === "voice" && (
+        <div className="card" style={{ maxWidth: "600px", margin: "0 auto" }}>
+          <div className="card-header">
+            <span className="card-title">🎤 Voice Chat with K1</span>
+          </div>
+          <VoiceChat />
         </div>
       )}
 

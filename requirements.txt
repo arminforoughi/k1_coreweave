@@ -19,6 +19,11 @@ stagehand>=1.0.0
 weave>=0.50.0
 wandb>=0.16.0
 
+# Voice Chat (laptop mic/speaker)
+openai>=1.12.0
+sounddevice>=0.4.6
+httpx>=0.25.0
+
 # Utils
 python-dotenv>=1.0.0
 Pillow>=10.0.0

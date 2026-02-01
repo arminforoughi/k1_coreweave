@@ -15,7 +15,7 @@ interface Detection {
   timestamp: number;
 }
 
-const API_URL = "http://localhost:8003";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function CameraPreview({ onDeviceChange }: CameraPreviewProps) {
   const [detections, setDetections] = useState<Detection[]>([]);

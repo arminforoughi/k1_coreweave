@@ -1,4 +1,4 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8003";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export async function fetchObjects(count = 50) {
   const res = await fetch(`${API_BASE}/events/objects?count=${count}`);
@@ -89,4 +89,37 @@ export async function getCameraStatus() {
   const res = await fetch(`${API_BASE}/camera/status`);
   if (!res.ok) throw new Error("Failed to get camera status");
   return res.json();
+}
+
+// Voice API
+export async function voiceQuery(audioBlob: Blob): Promise<{ transcription: string; response: string; detections: string }> {
+  const formData = new FormData();
+  formData.append("audio", audioBlob, "recording.webm");
+  
+  const res = await fetch(`${API_BASE}/voice/query`, {
+    method: "POST",
+    body: formData,
+  });
+  
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Voice query failed");
+  }
+  return res.json();
+}
+
+export async function voiceTextQuery(text: string): Promise<{ transcription: string; response: string; detections: string }> {
+  const res = await fetch(`${API_BASE}/voice/query?text=${encodeURIComponent(text)}`, {
+    method: "POST",
+  });
+  
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Voice query failed");
+  }
+  return res.json();
+}
+
+export function getVoiceSpeakUrl(text: string): string {
+  return `${API_BASE}/voice/speak?text=${encodeURIComponent(text)}`;
 }

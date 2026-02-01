@@ -13,7 +13,7 @@ import redis
 import weave
 from io import BytesIO
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -756,6 +756,149 @@ async def websocket_detections(websocket: WebSocket):
                         })
     except WebSocketDisconnect:
         pass
+
+
+# --- Voice Chat Endpoints ---
+
+class VoiceQueryRequest(BaseModel):
+    """Voice query with optional audio data."""
+    text: Optional[str] = None  # Transcribed text (if client transcribes)
+    audio_b64: Optional[str] = None  # Raw audio as base64 (if server transcribes)
+
+
+@app.post("/voice/query")
+async def voice_query(audio: Optional[UploadFile] = None, text: Optional[str] = None):
+    """Process voice query about what the robot sees."""
+    import openai
+    
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+    
+    client = openai.OpenAI(api_key=openai_key)
+    
+    # Get user text (either from transcription or direct text)
+    user_text = text
+    if audio and not user_text:
+        # Transcribe audio
+        audio_data = await audio.read()
+        audio_file = BytesIO(audio_data)
+        audio_file.name = "recording.webm"
+        
+        try:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+            user_text = transcript.text
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
+    
+    if not user_text:
+        raise HTTPException(status_code=400, detail="No text or audio provided")
+    
+    # Get vision context from Redis
+    frame_b64 = r.get("latest_frame")
+    det_json = r.get("latest_detections")
+    
+    detections = []
+    if det_json:
+        try:
+            detections = json.loads(det_json)
+        except:
+            pass
+    
+    # Format detection summary
+    if detections:
+        counts = {}
+        for det in detections:
+            cls = det.get("label", det.get("yolo_class", "unknown"))
+            counts[cls] = counts.get(cls, 0) + 1
+        detection_summary = "Currently detecting: " + ", ".join(
+            f"{count} {name}{'s' if count > 1 else ''}" 
+            for name, count in counts.items()
+        )
+    else:
+        detection_summary = "No objects currently detected"
+    
+    # Build prompt
+    system_prompt = """You are K1, a friendly robot assistant with vision capabilities.
+You can see through your camera and describe what you observe.
+
+When asked about what you see:
+1. Describe the scene naturally and conversationally
+2. Mention specific objects with their positions
+3. Be helpful but keep responses concise (2-3 sentences)
+
+Keep responses short and conversational - you're speaking out loud!"""
+
+    # Build message with image if available
+    if frame_b64:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"[{detection_summary}]\n\nUser: {user_text}"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{frame_b64}",
+                            "detail": "high"
+                        }
+                    }
+                ]
+            }
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"[{detection_summary}]\n\nUser: {user_text}"}
+        ]
+    
+    # Get LLM response
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            max_tokens=300
+        )
+        response_text = response.choices[0].message.content
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM failed: {e}")
+    
+    return {
+        "transcription": user_text,
+        "response": response_text,
+        "detections": detection_summary
+    }
+
+
+@app.get("/voice/speak")
+async def voice_speak(text: str):
+    """Convert text to speech."""
+    import openai
+    
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+    
+    client = openai.OpenAI(api_key=openai_key)
+    
+    try:
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="nova",
+            input=text
+        )
+        
+        return StreamingResponse(
+            BytesIO(response.content),
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "inline; filename=speech.mp3"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
 
 
 def start_server():
