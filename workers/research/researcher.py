@@ -336,43 +336,52 @@ related to "{label}" from these search results. Include regulatory info if avail
                 pass
 
 
-def _bb_rate_limit_wait():
-    """Block until we have capacity under the Browserbase burst rate limit."""
-    with _bb_lock:
-        now = time.time()
-        # Prune timestamps older than the window
-        cutoff = now - _BB_WINDOW_SECONDS
-        while _bb_timestamps and _bb_timestamps[0] < cutoff:
-            _bb_timestamps.pop(0)
+def _bb_acquire_slot():
+    """Block until we have capacity under the Browserbase burst rate limit.
 
-        if len(_bb_timestamps) >= _BB_MAX_PER_WINDOW:
-            # Wait until the oldest timestamp expires
+    Waits in a loop so multiple concurrent threads queue up fairly.
+    """
+    while True:
+        with _bb_lock:
+            now = time.time()
+            cutoff = now - _BB_WINDOW_SECONDS
+            while _bb_timestamps and _bb_timestamps[0] < cutoff:
+                _bb_timestamps.pop(0)
+
+            if len(_bb_timestamps) < _BB_MAX_PER_WINDOW:
+                _bb_timestamps.append(now)
+                return  # slot acquired
+
+            # Calculate wait time
             wait_time = _bb_timestamps[0] + _BB_WINDOW_SECONDS - now + 1
             print(f"  Browserbase rate limit: waiting {wait_time:.0f}s "
                   f"({len(_bb_timestamps)}/{_BB_MAX_PER_WINDOW} sessions in window)")
-            return wait_time
-    return 0
+
+        # Sleep outside the lock so other threads can proceed
+        time.sleep(wait_time)
+
+
+_BB_MAX_RETRIES = 2
 
 
 def _run_deep_research(label: str) -> Optional[dict]:
-    """Sync wrapper for async Browserbase research with rate limiting."""
-    # Wait for rate limit capacity
-    wait = _bb_rate_limit_wait()
-    if wait > 0:
-        time.sleep(wait)
-
-    # Record this session timestamp
-    with _bb_lock:
-        _bb_timestamps.append(time.time())
-
-    try:
-        loop = asyncio.new_event_loop()
-        result = loop.run_until_complete(_deep_research_via_browserbase(label))
-        loop.close()
-        return result
-    except Exception as e:
-        print(f"Deep research wrapper failed: {e}")
-        return None
+    """Sync wrapper for async Browserbase research with rate limiting + retry."""
+    for attempt in range(_BB_MAX_RETRIES + 1):
+        _bb_acquire_slot()
+        try:
+            loop = asyncio.new_event_loop()
+            result = loop.run_until_complete(_deep_research_via_browserbase(label))
+            loop.close()
+            return result
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str and attempt < _BB_MAX_RETRIES:
+                print(f"  Browserbase 429 on attempt {attempt+1}, retrying after cooldown...")
+                time.sleep(_BB_WINDOW_SECONDS)
+                continue
+            print(f"Deep research failed (attempt {attempt+1}): {e}")
+            return None
+    return None
 
 
 def _research_via_image_search(thumbnail_b64: str, yolo_hint: str) -> Optional[dict]:
