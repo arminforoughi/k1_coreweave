@@ -293,11 +293,19 @@ class JetsonClientNode(Node):
         if not detections:
             return
 
+        # Encode full frame for live preview (resized to save bandwidth)
+        h, w = frame.shape[:2]
+        scale = min(640 / max(h, w), 1.0)
+        preview = cv2.resize(frame, (int(w * scale), int(h * scale)))
+        _, buf = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        frame_b64 = base64.b64encode(buf).decode("ascii")
+
         # POST to backend
         payload = {
             "timestamp": now,
             "frame_id": self._frame_id,
             "detections": detections,
+            "frame_b64": frame_b64,
         }
         success, data = post_to_backend(self._ingest_url, payload)
         if success:
@@ -377,10 +385,18 @@ def run_fallback(backend_url, camera_index, target_fps, yolo_confidence,
             if not detections:
                 continue
 
+            # Encode full frame for live preview
+            h, w = frame.shape[:2]
+            scale = min(640 / max(h, w), 1.0)
+            preview = cv2.resize(frame, (int(w * scale), int(h * scale)))
+            _, buf = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            frame_b64 = base64.b64encode(buf).decode("ascii")
+
             payload = {
                 "timestamp": now,
                 "frame_id": frame_id,
                 "detections": detections,
+                "frame_b64": frame_b64,
             }
             success, data = post_to_backend(ingest_url, payload)
             if success:

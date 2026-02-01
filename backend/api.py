@@ -15,6 +15,7 @@ from io import BytesIO
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from PIL import Image
@@ -103,42 +104,45 @@ def gate_decision_op(
     crop_quality: float = None,
     prefilter_action: str = None,
 ) -> dict:
-    """Decide known/uncertain/unknown using KNN + YOLO + depth signals."""
-    state, label, similarity = gating.decide(matches)
+    """Gate detections: YOLO is primary, KNN supplements with learned objects.
 
-    # If gating returned None for label, use YOLO class
-    # (happens for "uncertain" and "unknown" states)
-    if label is None:
-        label = yolo_class
+    Logic:
+    - YOLO is always trusted for its 80 COCO classes.
+    - KNN only overrides when it has a high-confidence match to a LEARNED label
+      (i.e. something not in YOLO's vocabulary, added via research/teach).
+    - "known" = YOLO confident OR KNN has strong learned match
+    - "unknown" = YOLO low confidence AND KNN has no match → triggers research
+    """
+    knn_state, knn_label, knn_similarity = gating.decide(matches)
 
-    # If KNN has no opinion but YOLO is very confident, trust YOLO
-    if state == "unknown" and yolo_confidence >= 0.75:
+    # YOLO is the primary detector — always use its label and confidence
+    label = yolo_class
+    confidence = yolo_confidence
+
+    # Determine state based on YOLO confidence
+    if yolo_confidence >= 0.5:
+        state = "known"
+    elif yolo_confidence >= 0.25:
         state = "uncertain"
-        label = yolo_class
-        similarity = yolo_confidence
+    else:
+        state = "unknown"
 
-    # Priority learning target: Jetson flagged this as low-confidence but
-    # high-quality capture — promote to uncertain so the learning flow
-    # engages sooner (research/teach).
-    if prefilter_action == "priority" and state == "unknown":
-        state = "uncertain"
-        label = yolo_class
-
-    # Depth-based confidence adjustments (only when depth is available)
-    if depth_value is not None:
-        # Close object + borderline uncertain → trust KNN more (good crop)
-        if depth_value > 0.5 and state == "uncertain" and similarity >= 0.6:
-            state = "known"
-        # Far object + borderline known → trust KNN less (poor crop quality)
-        if depth_value < 0.15 and state == "known" and similarity < 0.8:
-            state = "uncertain"
+    # KNN override: only if KNN found a strong match to a LEARNED label
+    # (a label that was added via research/teach, not a YOLO class)
+    if knn_state == "known" and knn_label and knn_similarity >= 0.8:
+        # KNN is very confident — use the learned label instead
+        label = knn_label
+        confidence = knn_similarity
+        state = "known"
 
     return {
         "state": state,
         "label": label,
-        "similarity": similarity,
+        "similarity": confidence,
         "yolo_class": yolo_class,
         "yolo_confidence": yolo_confidence,
+        "knn_label": knn_label,
+        "knn_similarity": knn_similarity,
         "depth_value": depth_value,
         "crop_quality": crop_quality,
     }
@@ -166,6 +170,7 @@ class IngestRequest(BaseModel):
     timestamp: float
     frame_id: int
     detections: list[Detection]
+    frame_b64: Optional[str] = None
 
 
 class LabelRequest(BaseModel):
@@ -209,6 +214,10 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
     This is the main endpoint called by the Jetson client every frame.
     """
     now = time.time()
+
+    # Store latest frame for MJPEG streaming
+    if req.frame_b64:
+        r.set("latest_frame", req.frame_b64)
 
     # Convert detections to tracker format
     det_list = [{"bbox": d.bbox, "class_name": d.yolo_class} for d in req.detections]
@@ -273,6 +282,8 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
             embedding=matched_track.embedding.tolist() if state != "known" else None,
             depth_value=det.depth_value,
             crop_quality=det.crop_quality,
+            yolo_class=det.yolo_class,
+            yolo_confidence=det.yolo_confidence,
         )
         r.xadd(STREAM_VISION_OBJECTS, event.to_redis())
 
@@ -311,11 +322,16 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
             "state": state,
             "label": label,
             "similarity": round(similarity, 4),
+            "bbox": det.bbox,
             "yolo_class": det.yolo_class,
             "yolo_confidence": det.yolo_confidence,
             "depth_value": det.depth_value,
             "crop_quality": det.crop_quality,
         })
+
+    # Store latest detections for MJPEG overlay
+    if results:
+        r.set("latest_detections", json.dumps(results))
 
     return {"objects": results, "track_count": len(tracks)}
 
@@ -548,6 +564,102 @@ def get_metrics_history():
             "event": "label_added",
         })
     return {"history": history}
+
+
+# --- Live video stream ---
+
+def _draw_overlays(frame_bytes: bytes) -> bytes:
+    """Draw bounding box overlays on a JPEG frame. Returns new JPEG bytes."""
+    import cv2
+
+    det_json = r.get("latest_detections")
+    if not det_json:
+        return frame_bytes
+
+    try:
+        detections = json.loads(det_json)
+    except Exception:
+        return frame_bytes
+
+    # Decode JPEG to numpy array
+    arr = np.frombuffer(frame_bytes, dtype=np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return frame_bytes
+
+    for det in detections:
+        bbox = det.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        state = det.get("state", "unknown")
+        label = det.get("label", state)
+        similarity = det.get("similarity", 0)
+
+        # Color based on state: green=known, yellow=uncertain, red=unknown
+        if state == "known":
+            color = (0, 255, 0)
+        elif state == "uncertain":
+            color = (0, 255, 255)
+        else:
+            color = (0, 0, 255)
+
+        # Draw bounding box
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        # Show confidence (YOLO primary, or KNN if learned label)
+        conf_val = det.get("similarity", 0)
+        label_text = f"{label} ({int(conf_val * 100)}%)"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+        (tw, th), _ = cv2.getTextSize(label_text, font, font_scale, thickness)
+        cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+        cv2.putText(frame, label_text, (x1 + 2, y1 - 4), font, font_scale, (0, 0, 0), thickness)
+
+    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return buf.tobytes()
+
+
+@app.get("/stream/mjpeg")
+def mjpeg_stream():
+    """MJPEG stream of the Jetson camera with bounding box overlays."""
+    def generate():
+        while True:
+            frame_b64 = r.get("latest_frame")
+            if frame_b64:
+                if isinstance(frame_b64, bytes):
+                    frame_b64 = frame_b64.decode("utf-8")
+                frame_bytes = base64.b64decode(frame_b64)
+                frame_bytes = _draw_overlays(frame_bytes)
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + frame_bytes
+                    + b"\r\n"
+                )
+            time.sleep(0.15)  # ~6-7 fps output
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/stream/snapshot")
+def snapshot():
+    """Single JPEG snapshot of the latest Jetson camera frame with overlays."""
+    frame_b64 = r.get("latest_frame")
+    if not frame_b64:
+        raise HTTPException(status_code=404, detail="No frame available")
+    if isinstance(frame_b64, bytes):
+        frame_b64 = frame_b64.decode("utf-8")
+    frame_bytes = base64.b64decode(frame_b64)
+    frame_bytes = _draw_overlays(frame_bytes)
+    return StreamingResponse(
+        BytesIO(frame_bytes),
+        media_type="image/jpeg",
+    )
 
 
 # Camera feed management

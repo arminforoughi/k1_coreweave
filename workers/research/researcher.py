@@ -14,6 +14,7 @@ import os
 import json
 import base64
 import weave
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,7 +25,7 @@ MODEL_API_KEY = os.getenv("MODEL_API_KEY") or os.getenv("OPENAI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 
-def _research_via_gpt_vision(thumbnail_b64: str, yolo_hint: str) -> dict | None:
+def _research_via_gpt_vision(thumbnail_b64: str, yolo_hint: str) -> Optional[dict]:
     """Use GPT-5+ vision to analyze the image."""
     from openai import OpenAI
 
@@ -35,8 +36,8 @@ def _research_via_gpt_vision(thumbnail_b64: str, yolo_hint: str) -> dict | None:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5",  # Will try gpt-5, fall back to latest available
-            max_tokens=1024,
+            model="gpt-4o",
+            max_completion_tokens=1024,
             messages=[
                 {
                     "role": "user",
@@ -87,7 +88,7 @@ Respond in JSON format:
     return None
 
 
-def _research_via_claude_vision(thumbnail_b64: str, yolo_hint: str, use_opus: bool = False) -> dict | None:
+def _research_via_claude_vision(thumbnail_b64: str, yolo_hint: str, use_opus: bool = False) -> Optional[dict]:
     """Use Claude vision via Anthropic API to analyze the image directly.
 
     Args:
@@ -158,7 +159,7 @@ Respond in JSON format:
     return None
 
 
-def _research_via_image_search(thumbnail_b64: str, yolo_hint: str) -> dict | None:
+def _research_via_image_search(thumbnail_b64: str, yolo_hint: str) -> Optional[dict]:
     """Multi-model image analysis with ensemble voting.
 
     Tries GPT-5+ first (if available), then Claude Sonnet 4.5.
