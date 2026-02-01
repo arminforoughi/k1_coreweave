@@ -286,6 +286,8 @@ def ingest_frame(req: IngestRequest, background_tasks: BackgroundTasks):
                     top_similarity=similarity,
                     depth_value=det.depth_value,
                     crop_quality=det.crop_quality,
+                    yolo_class=det.yolo_class,
+                    yolo_confidence=det.yolo_confidence,
                 )
                 r.xadd(STREAM_VISION_UNKNOWN, unknown_event.to_redis(), maxlen=500)
                 r.incr(METRICS_UNKNOWN_COUNT)
@@ -405,11 +407,15 @@ def trigger_research(track_id: str, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=404, detail=f"No unknown event for track {track_id}")
 
     # Queue research in background
+    yolo_conf_str = target.get("yolo_confidence", "0")
+    yolo_conf = float(yolo_conf_str) if yolo_conf_str else 0.0
+
     background_tasks.add_task(
         _do_research,
         track_id=track_id,
         thumbnail_b64=target.get("thumbnail_b64", ""),
         yolo_hint=target.get("yolo_class", ""),
+        yolo_confidence=yolo_conf,
     )
 
     return {"status": "research_queued", "track_id": track_id}

@@ -53,6 +53,8 @@ class UnknownEvent:
     top_similarity: float = 0.0
     depth_value: Optional[float] = None
     crop_quality: Optional[float] = None
+    yolo_class: str = ""  # YOLO's best guess for research hint
+    yolo_confidence: float = 0.0  # YOLO confidence for fallback
     timestamp: float = field(default_factory=time.time)
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
@@ -74,6 +76,9 @@ class UnknownEvent:
         data["depth_value"] = float(dv) if dv else None
         cq = data.get("crop_quality", "")
         data["crop_quality"] = float(cq) if cq else None
+        yc = data.get("yolo_confidence", "")
+        data["yolo_confidence"] = float(yc) if yc else 0.0
+        data["yolo_class"] = data.get("yolo_class", "")
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
