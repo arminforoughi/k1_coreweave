@@ -31,9 +31,11 @@ jetson-client:
 
 # Run the Jetson client with ROS 2 camera topic + MiDaS depth
 # Usage: make jetson-ros BACKEND=http://<laptop-ip>:8000
-# Note: ROS 2 mode is auto-detected when rclpy is available
+# Note: Requires FastDDS SHM profile to see the camera bridge
 jetson-ros:
-	source /opt/ros/humble/setup.bash && python perception/jetson_client.py --backend $(BACKEND)
+	export FASTRTPS_DEFAULT_PROFILES_FILE=/opt/booster/BoosterRos2/fastdds_profile.xml && \
+	source /opt/ros/humble/setup.bash && \
+	python perception/jetson_client.py --backend $(BACKEND) --topic /booster_camera_bridge/image_left_raw
 
 # Install Jetson-only dependencies
 jetson-setup:
