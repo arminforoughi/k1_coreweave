@@ -1,0 +1,24 @@
+# Core
+redis[hiredis]>=5.0.0
+numpy>=1.24.0
+
+# Embedding (runs on laptop)
+torch
+torchvision
+opencv-python-headless>=4.8.0
+
+# Backend
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Research worker (Browserbase)
+stagehand>=1.0.0
+
+# Observability
+weave>=0.50.0
+wandb>=0.16.0
+
+# Utils
+python-dotenv>=1.0.0
+Pillow>=10.0.0
