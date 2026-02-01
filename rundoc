@@ -1,0 +1,48 @@
+                                                                                                                                                                 
+  On Your Laptop (run each in a separate terminal):                                                                                                                
+                                                                                                                                                                   
+  # 1. Start Redis Stack (first time only)                                                                                                                         
+  make redis                                                                                                                                                       
+                                                                                                                                                                   
+  # 2. Setup Redis indexes (first time only)                                                                                                                       
+  make redis-setup                                                                                                                                                 
+                                                                                                                                                                   
+  # 3. Install dependencies (first time only)                                                                                                                      
+  make setup                                                                                                                                                       
+                                                                                                                                                                   
+  # 4. Start the backend API (embeddings + KNN)                                                                                                                    
+  make backend                                                                                                                                                     
+                                                                                                                                                                   
+  # 5. Start the web dashboard                                                                                                                                     
+  make dashboard                                                                                                                                                   
+                                                                                                                                                                   
+  On the Jetson (Robot):                                                                                                                                           
+                                                                                                                                                                   
+  # Install dependencies (first time only)                                                                                                                         
+  make jetson-setup                                                                                                                                                
+                                                                                                                                                                   
+  # Run with ROS 2 camera bridge (primary method)                                                                                                                  
+  make jetson-ros BACKEND=http://<your-laptop-ip>:8000                                                                                                             
+                                                                                                                                                                   
+  # OR run with fallback camera (if ROS 2 not available)                                                                                                           
+  make jetson-client BACKEND=http://<your-laptop-ip>:8000                                                                                                          
+                                                                                                                                                                   
+  Then access the dashboard at http://localhost:3000 (or wherever the dashboard runs).                                                                             
+                                                                                                                                                                   
+  ---                                                                                                                                                              
+  Option 2: Standalone Scripts (Simpler)                                                                                                                           
+                                                                                                                                                                   
+  Camera Feed Detection with Web Viewer                                                                                                                            
+                                                                                                                                                                   
+  python3 camera_feed_detection.py --stereo --depth-model dpt-beit                                                                                                 
+  # Access at http://localhost:8080                                                                                                                                
+                                                                                                                                                                   
+  Person Following Robot                                                                                                                                           
+                                                                                                                                                                   
+  python3 k1_follow_person.py 127.0.0.1 --yolo yolov8n.pt --depth small --web --port 8080 --auto-follow                                                            
+  # Access web interface at http://localhost:8080                                                                                                                  
+                                                                                                                                                                   
+  Extract Low-Confidence Objects                                                                                                                                   
+                                                                                                                                                                   
+  python3 extract_low_confidence_objects.py --threshold 0.65                                                                                                       
+                                                                  
