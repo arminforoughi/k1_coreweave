@@ -15,7 +15,7 @@ BACKEND_URL="${BACKEND_URL:-http://10.20.15.165:8003}"
 
 python3 perception/jetson_client.py \
   --backend "$BACKEND_URL" \
-  --topic /image_left_raw \
+  --topic /booster_camera_bridge/image_left_raw \
   --no-depth \
   --fps 2.0 \
   --confidence 0.25
