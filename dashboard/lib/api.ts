@@ -1,4 +1,4 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8003";
 
 export async function fetchObjects(count = 50) {
   const res = await fetch(`${API_BASE}/events/objects?count=${count}`);

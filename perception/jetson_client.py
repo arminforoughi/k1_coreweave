@@ -35,15 +35,16 @@ try:
     HAS_ROS2 = True
 except ImportError:
     HAS_ROS2 = False
+    # Stub so class definition doesn't fail at parse time
+    class Node:
+        pass
 
 from ultralytics import YOLO
 
-# Depth estimator is optional — gracefully handle if torch.hub fails
-try:
-    from perception.depth_estimator import DepthEstimator
-    HAS_DEPTH = True
-except Exception:
-    HAS_DEPTH = False
+# Depth estimator - import will be conditional on --no-depth flag
+# Set by main() based on args
+HAS_DEPTH = True
+DepthEstimator = None
 
 
 # ---------------------------------------------------------------------------
@@ -407,13 +408,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="OpenClawdIRL Jetson Client (ROS 2 + MiDaS depth)"
     )
-    parser.add_argument("--backend", default="http://localhost:8000",
-                        help="Backend URL (default: http://localhost:8000)")
+    parser.add_argument("--backend", default="http://localhost:8003",
+                        help="Backend URL (default: http://localhost:8003)")
     parser.add_argument("--topic",
                         default="/booster_camera_bridge/image_left_raw",
                         help="ROS 2 camera topic")
     parser.add_argument("--camera", type=int, default=0,
                         help="Camera index for fallback mode (default: 0)")
+    parser.add_argument("--video", type=str, default=None,
+                        help="Path to video file (replaces camera, implies --fallback)")
     parser.add_argument("--fps", type=float, default=3.0,
                         help="Target FPS (default: 3)")
     parser.add_argument("--confidence", type=float, default=0.15,
@@ -423,12 +426,28 @@ def main():
                         help="MiDaS model size (default: small)")
     parser.add_argument("--fallback", action="store_true",
                         help="Force cv2.VideoCapture fallback (skip ROS 2)")
+    parser.add_argument("--no-depth", action="store_true",
+                        help="Skip MiDaS depth estimation (faster startup)")
     # Pre-filter thresholds (can also be set via env vars)
     parser.add_argument("--depth-min", type=float, default=0.08)
     parser.add_argument("--depth-max", type=float, default=0.95)
     parser.add_argument("--crop-quality-min", type=float, default=0.15)
     parser.add_argument("--confidence-low", type=float, default=0.5)
     args = parser.parse_args()
+
+    # Conditionally import depth estimator based on --no-depth flag
+    global HAS_DEPTH, DepthEstimator
+    if args.no_depth:
+        HAS_DEPTH = False
+        print("Depth estimation disabled (--no-depth)")
+    else:
+        try:
+            from perception.depth_estimator import DepthEstimator
+            HAS_DEPTH = True
+            print("Depth estimation enabled")
+        except Exception as e:
+            HAS_DEPTH = False
+            print(f"Depth estimation unavailable ({e})")
 
     prefilter_cfg = {
         "depth_min": args.depth_min,
@@ -438,7 +457,14 @@ def main():
         "confidence_floor": args.confidence,
     }
 
-    if HAS_ROS2 and not args.fallback:
+    # --video implies --fallback with file path instead of camera index
+    video_source = args.camera
+    force_fallback = args.fallback
+    if args.video:
+        video_source = args.video
+        force_fallback = True
+
+    if HAS_ROS2 and not force_fallback:
         rclpy.init()
         node = JetsonClientNode(
             backend_url=args.backend,
@@ -462,7 +488,7 @@ def main():
     else:
         run_fallback(
             backend_url=args.backend,
-            camera_index=args.camera,
+            camera_index=video_source,
             target_fps=args.fps,
             yolo_confidence=args.confidence,
             midas_model=args.midas_model,
