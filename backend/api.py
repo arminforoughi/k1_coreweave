@@ -979,6 +979,376 @@ async def voice_speak(text: str):
         raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
 
 
+# --- Manual Video Pipeline (SSE) ---
+
+@app.post("/pipeline/run")
+async def run_pipeline(video: UploadFile):
+    """Process an uploaded video through the full pipeline, streaming SSE progress.
+
+    Each step emits a Server-Sent Event so the dashboard can render a live
+    play-by-play terminal feed.
+    """
+    import cv2
+    import tempfile
+    from ultralytics import YOLO
+
+    # Save upload to temp file so cv2 can read it
+    tmp = tempfile.NamedTemporaryFile(suffix=".mov", delete=False)
+    content = await video.read()
+    tmp.write(content)
+    tmp.flush()
+    tmp_path = tmp.name
+    tmp.close()
+
+    def generate():
+        """Generator that yields SSE events as the pipeline runs."""
+        yolo_model = YOLO("yolov8n.pt")
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            yield _sse({"type": "error", "message": "Failed to open video file"})
+            return
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        target_fps = 2.0
+        frame_skip = max(1, int(fps / target_fps))
+
+        yield _sse({"type": "info", "message": f"Video loaded: {total_frames} frames at {fps:.0f} FPS, sampling every {frame_skip} frames"})
+        yield _sse({"type": "info", "message": f"KNN memory: {len(memory.get_all_labels())} labels, {memory.get_memory_count()} embeddings"})
+
+        # Local tracker for this run
+        local_tracker = SimpleTracker(iou_threshold=0.2, max_age=10.0)
+        frame_idx = 0
+        processed = 0
+        research_queue = []  # Collect research tasks to run after detection pass
+
+        prefilter_cfg = {
+            "depth_min": 0.08, "depth_max": 0.95,
+            "crop_quality_min": 0.15, "confidence_low": 0.5,
+            "confidence_floor": 0.25,
+        }
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_idx += 1
+            if frame_idx % frame_skip != 0:
+                continue
+            processed += 1
+            video_ts = frame_idx / fps
+
+            # YOLO detection
+            results = yolo_model(frame, conf=0.25, verbose=False)
+            from perception.jetson_client import process_yolo_results, encode_crop
+            detections, filtered = process_yolo_results(
+                results, frame, None, None, prefilter_cfg
+            )
+
+            if not detections:
+                continue
+
+            yield _sse({"type": "frame", "frame": processed, "time": round(video_ts, 1),
+                        "detections": len(detections), "filtered": filtered})
+
+            # Convert to tracker format
+            det_list = [{"bbox": d["bbox"], "class_name": d["yolo_class"]} for d in detections]
+            tracks = local_tracker.update(det_list)
+
+            # Store full frame for MJPEG preview
+            h, w = frame.shape[:2]
+            scale = min(640 / max(h, w), 1.0)
+            preview = cv2.resize(frame, (int(w * scale), int(h * scale)))
+            _, buf = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            frame_b64 = base64.b64encode(buf).decode("ascii")
+            r.set("latest_frame", frame_b64)
+
+            for det in detections:
+                # Match detection to track
+                matched_track = None
+                for track in tracks:
+                    if track.bbox == det["bbox"]:
+                        matched_track = track
+                        break
+                if not matched_track:
+                    continue
+
+                # Embed
+                try:
+                    crop = decode_crop(det["crop_b64"])
+                    embedding = embed_crop_op(crop)
+                except Exception:
+                    continue
+
+                # EMA
+                if matched_track.embedding is not None:
+                    matched_track.embedding = 0.8 * matched_track.embedding + 0.2 * embedding
+                    norm = np.linalg.norm(matched_track.embedding)
+                    if norm > 0:
+                        matched_track.embedding = matched_track.embedding / norm
+                else:
+                    matched_track.embedding = embedding
+
+                # KNN
+                matches = knn_lookup_op(matched_track.embedding)
+                decision = gate_decision_op(
+                    matches, det["yolo_class"], det["yolo_confidence"],
+                    depth_value=det.get("depth_value"),
+                    crop_quality=det.get("crop_quality"),
+                )
+                state = decision["state"]
+                label = decision["label"]
+                similarity = decision["similarity"]
+
+                matched_track.state = state
+                matched_track.label = label
+                matched_track.similarity = similarity
+
+                # Publish to Redis streams (so dashboard tabs work too)
+                event = ObjectEvent(
+                    track_id=matched_track.track_id,
+                    bbox=det["bbox"],
+                    state=state,
+                    label=label,
+                    similarity=similarity,
+                    thumbnail_b64=det["crop_b64"],
+                    embedding=matched_track.embedding.tolist() if state != "known" else None,
+                    depth_value=det.get("depth_value"),
+                    crop_quality=det.get("crop_quality"),
+                    yolo_class=det["yolo_class"],
+                    yolo_confidence=det["yolo_confidence"],
+                )
+                r.xadd(STREAM_VISION_OBJECTS, event.to_redis())
+                r.incr(METRICS_TOTAL_QUERIES)
+                if state == "known":
+                    r.incr(METRICS_KNOWN_COUNT)
+
+                knn_info = f"KNN: {decision['knn_label'] or 'no match'} ({decision['knn_similarity']:.0%})" if decision['knn_similarity'] > 0 else "KNN: no match"
+
+                yield _sse({
+                    "type": "detection",
+                    "track_id": matched_track.track_id,
+                    "yolo_class": det["yolo_class"],
+                    "yolo_conf": round(det["yolo_confidence"] * 100, 1),
+                    "state": state,
+                    "label": label,
+                    "similarity": round(similarity * 100, 1),
+                    "frames_seen": matched_track.frames_seen,
+                    "knn_info": knn_info,
+                })
+
+                # Research trigger
+                now = time.time()
+                if state in ("unknown", "uncertain") and matched_track.frames_seen >= config.perception.persistence_frames:
+                    if now > matched_track.cooldown_until:
+                        matched_track.cooldown_until = now + config.perception.cooldown_seconds
+
+                        unknown_event = UnknownEvent(
+                            track_id=matched_track.track_id,
+                            thumbnail_b64=det["crop_b64"],
+                            embedding=matched_track.embedding.tolist(),
+                            top_similarity=similarity,
+                            depth_value=det.get("depth_value"),
+                            crop_quality=det.get("crop_quality"),
+                            yolo_class=det["yolo_class"],
+                            yolo_confidence=det["yolo_confidence"],
+                        )
+                        r.xadd(STREAM_VISION_UNKNOWN, unknown_event.to_redis())
+                        r.incr(METRICS_UNKNOWN_COUNT)
+
+                        yield _sse({
+                            "type": "persistence",
+                            "track_id": matched_track.track_id,
+                            "yolo_class": det["yolo_class"],
+                            "frames_seen": matched_track.frames_seen,
+                            "message": f"Persistence threshold reached ({matched_track.frames_seen}/{config.perception.persistence_frames}) — research triggered!",
+                        })
+
+                        research_queue.append({
+                            "track_id": matched_track.track_id,
+                            "thumbnail_b64": det["crop_b64"],
+                            "yolo_hint": det["yolo_class"],
+                            "yolo_confidence": det["yolo_confidence"],
+                            "embedding": matched_track.embedding.tolist(),
+                        })
+
+                # Store latest detections for overlay
+                det_result = {
+                    "track_id": matched_track.track_id,
+                    "state": state, "label": label,
+                    "similarity": round(similarity, 4),
+                    "bbox": det["bbox"],
+                    "yolo_class": det["yolo_class"],
+                    "yolo_confidence": det["yolo_confidence"],
+                }
+                r.set("latest_detections", json.dumps([det_result]))
+
+        cap.release()
+        os.unlink(tmp_path)
+
+        yield _sse({"type": "info", "message": f"Video scan complete. {processed} frames processed, {len(research_queue)} objects queued for research."})
+
+        # Now run research synchronously so we can stream progress
+        if research_queue:
+            yield _sse({"type": "info", "message": "Starting research phase..."})
+
+            from workers.research.researcher import research_object
+            for i, item in enumerate(research_queue):
+                track_id = item["track_id"]
+                yield _sse({
+                    "type": "research_start",
+                    "track_id": track_id,
+                    "yolo_class": item["yolo_hint"],
+                    "index": i + 1,
+                    "total": len(research_queue),
+                    "message": f"Researching object {i+1}/{len(research_queue)}: {item['yolo_hint']}...",
+                })
+
+                try:
+                    result = research_object(
+                        item["thumbnail_b64"],
+                        item["yolo_hint"],
+                        yolo_confidence=item["yolo_confidence"],
+                    )
+
+                    if result and result.get("confidence", 0) > 0.7:
+                        label_name = result["label"]
+                        embedding = np.array(item["embedding"], dtype=np.float32)
+                        label_id = learn_label_op(label_name, [embedding])
+
+                        label_event = LabelEvent(
+                            track_id=track_id,
+                            label_name=label_name,
+                            label_id=label_id,
+                        )
+                        r.xadd(STREAM_VISION_LABELS, label_event.to_redis())
+
+                        research_data = {
+                            "track_id": track_id,
+                            "label": label_name,
+                            "confidence": str(result["confidence"]),
+                            "description": result.get("description", ""),
+                            "source": result.get("source", ""),
+                            "auto_labeled": "true",
+                            "timestamp": str(time.time()),
+                            "thumbnail_b64": item["thumbnail_b64"],
+                        }
+                        if result.get("facts"):
+                            research_data["facts"] = json.dumps(result["facts"])
+                        if result.get("manufacturer"):
+                            research_data["manufacturer"] = result["manufacturer"]
+                        if result.get("price"):
+                            research_data["price"] = result["price"]
+                        if result.get("specs"):
+                            research_data["specs"] = json.dumps(result["specs"])
+                        if result.get("safety_info"):
+                            research_data["safety_info"] = result["safety_info"]
+                        if result.get("web_description"):
+                            research_data["web_description"] = result["web_description"]
+                        if result.get("product_url"):
+                            research_data["product_url"] = result["product_url"]
+                        if result.get("search_sources"):
+                            research_data["search_sources"] = json.dumps(result["search_sources"])
+                        r.xadd(STREAM_VISION_RESEARCHED, research_data)
+
+                        yield _sse({
+                            "type": "research_complete",
+                            "track_id": track_id,
+                            "label": label_name,
+                            "confidence": round(result["confidence"] * 100, 1),
+                            "source": result.get("source", ""),
+                            "description": result.get("description", ""),
+                            "manufacturer": result.get("manufacturer"),
+                            "price": result.get("price"),
+                            "specs_count": len(result.get("specs", [])),
+                            "has_safety": bool(result.get("safety_info")),
+                            "message": f"Learned: {label_name} ({result['confidence']:.0%} confidence)",
+                        })
+                    else:
+                        conf = result.get("confidence", 0) if result else 0
+                        lbl = result.get("label", "unknown") if result else "unknown"
+                        yield _sse({
+                            "type": "research_low_conf",
+                            "track_id": track_id,
+                            "label": lbl,
+                            "confidence": round(conf * 100, 1),
+                            "message": f"Low confidence: {lbl} ({conf:.0%}) — queued for review",
+                        })
+
+                except Exception as e:
+                    yield _sse({
+                        "type": "research_error",
+                        "track_id": track_id,
+                        "message": f"Research failed: {str(e)[:100]}",
+                    })
+
+        # Final summary
+        labels_now = memory.get_all_labels()
+        emb_count = memory.get_memory_count()
+        unknown_count = int(r.get(METRICS_UNKNOWN_COUNT) or 0)
+        known_count = int(r.get(METRICS_KNOWN_COUNT) or 0)
+        total_queries = int(r.get(METRICS_TOTAL_QUERIES) or 0)
+
+        yield _sse({
+            "type": "complete",
+            "labels": len(labels_now),
+            "embeddings": emb_count,
+            "unknown_count": unknown_count,
+            "known_count": known_count,
+            "total_queries": total_queries,
+            "message": f"Pipeline complete. {len(labels_now)} objects learned, {emb_count} embeddings stored.",
+        })
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/pipeline/reset")
+def pipeline_reset():
+    """Flush all learned data for a fresh demo run."""
+    for pattern in ["emb:*", "label:*", "track:*", "objcard:*"]:
+        keys = list(r.scan_iter(pattern))
+        if keys:
+            r.delete(*keys)
+    for stream in [STREAM_VISION_OBJECTS, STREAM_VISION_UNKNOWN,
+                   STREAM_VISION_LABELS, STREAM_VISION_RESEARCHED]:
+        try:
+            r.delete(stream)
+        except Exception:
+            pass
+    for k in [METRICS_UNKNOWN_COUNT, METRICS_KNOWN_COUNT, METRICS_TOTAL_QUERIES]:
+        r.delete(k)
+    r.delete("latest_frame", "latest_detections")
+    try:
+        r.execute_command("FT.DROPINDEX", "idx:embeddings", "DD")
+    except Exception:
+        pass
+    # Recreate vector index
+    r.execute_command(
+        "FT.CREATE", "idx:embeddings",
+        "ON", "JSON",
+        "PREFIX", "1", "emb:",
+        "SCHEMA",
+        "$.label_id", "AS", "label_id", "TAG",
+        "$.label_name", "AS", "label_name", "TEXT",
+        "$.created_at", "AS", "created_at", "NUMERIC",
+        "$.vector", "AS", "vector", "VECTOR", "FLAT", "6",
+        "TYPE", "FLOAT32", "DIM", str(embedder.dim), "DISTANCE_METRIC", "COSINE",
+    )
+    # Reset tracker
+    global tracker
+    tracker = SimpleTracker(iou_threshold=0.2, max_age=10.0)
+    return {"status": "reset", "message": "All data flushed. Ready for fresh run."}
+
+
+def _sse(data: dict) -> str:
+    """Format a dict as an SSE event."""
+    return f"data: {json.dumps(data)}\n\n"
+
+
 def start_server():
     import uvicorn
     uvicorn.run(

@@ -563,3 +563,26 @@ body {
 .empty-state p {
   font-size: 0.9rem;
 }
+
+/* Pipeline log */
+.pulse {
+  animation: pulse-anim 1s ease-in-out infinite;
+}
+
+@keyframes pulse-anim {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.pipeline-log::-webkit-scrollbar {
+  width: 6px;
+}
+
+.pipeline-log::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+
+.pipeline-log::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 3px;
+}

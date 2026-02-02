@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   fetchObjects,
   fetchUnknowns,
@@ -17,7 +17,38 @@ import {
 import CameraPreview from "@/components/CameraPreview";
 import VoiceChat from "@/components/VoiceChat";
 
-type Tab = "camera" | "voice" | "live" | "unknown" | "learned" | "metrics";
+type Tab = "camera" | "voice" | "live" | "unknown" | "learned" | "metrics" | "manual";
+
+interface PipelineEvent {
+  type: string;
+  message?: string;
+  track_id?: string;
+  yolo_class?: string;
+  yolo_conf?: number;
+  state?: string;
+  label?: string;
+  similarity?: number;
+  frames_seen?: number;
+  knn_info?: string;
+  confidence?: number;
+  source?: string;
+  description?: string;
+  manufacturer?: string | null;
+  price?: string | null;
+  specs_count?: number;
+  has_safety?: boolean;
+  index?: number;
+  total?: number;
+  labels?: number;
+  embeddings?: number;
+  unknown_count?: number;
+  known_count?: number;
+  total_queries?: number;
+  frame?: number;
+  time?: number;
+  detections?: number;
+  filtered?: number;
+}
 
 interface ObjectEvent {
   track_id: string;
@@ -95,6 +126,13 @@ export default function Dashboard() {
   const [expandedCard, setExpandedCard] = useState<string | null>(null);
   const [cameraRunning, setCameraRunning] = useState(false);
   const [cameraId, setCameraId] = useState(0);
+
+  // Manual pipeline state
+  const [pipelineEvents, setPipelineEvents] = useState<PipelineEvent[]>([]);
+  const [pipelineRunning, setPipelineRunning] = useState(false);
+  const [pipelineFile, setPipelineFile] = useState<File | null>(null);
+  const [pipelineRunCount, setPipelineRunCount] = useState(0);
+  const logRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -188,6 +226,69 @@ export default function Dashboard() {
     }
   };
 
+  const handlePipelineRun = async () => {
+    if (!pipelineFile || pipelineRunning) return;
+    setPipelineRunning(true);
+    setPipelineEvents([]);
+
+    const formData = new FormData();
+    formData.append("video", pipelineFile);
+
+    try {
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8003"}/pipeline/run`,
+        { method: "POST", body: formData }
+      );
+      const reader = res.body?.getReader();
+      if (!reader) return;
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const evt: PipelineEvent = JSON.parse(line.slice(6));
+              setPipelineEvents((prev) => [...prev, evt]);
+              // Auto-scroll
+              setTimeout(() => {
+                logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
+              }, 50);
+            } catch { /* skip malformed */ }
+          }
+        }
+      }
+    } catch (e) {
+      setPipelineEvents((prev) => [
+        ...prev,
+        { type: "error", message: `Connection failed: ${(e as Error).message}` },
+      ]);
+    } finally {
+      setPipelineRunning(false);
+      setPipelineRunCount((c) => c + 1);
+      refresh();
+    }
+  };
+
+  const handlePipelineReset = async () => {
+    try {
+      await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8003"}/pipeline/reset`,
+        { method: "POST" }
+      );
+      setPipelineEvents([]);
+      setPipelineRunCount(0);
+      refresh();
+    } catch (e) {
+      alert("Reset failed: " + (e as Error).message);
+    }
+  };
+
   // Deduplicate objects by track_id (keep most recent per track)
   const uniqueObjects = Object.values(
     objects.reduce<Record<string, ObjectEvent>>((acc, obj) => {
@@ -249,7 +350,7 @@ export default function Dashboard() {
       </div>
 
       <div className="tabs">
-        {(["camera", "voice", "live", "unknown", "learned", "metrics"] as Tab[]).map((t) => (
+        {(["camera", "voice", "live", "unknown", "learned", "metrics", "manual"] as Tab[]).map((t) => (
           <button
             key={t}
             className={`tab ${tab === t ? "active" : ""}`}
@@ -265,7 +366,9 @@ export default function Dashboard() {
               ? `Unknown Queue (${unknowns.length})`
               : t === "learned"
               ? "Learned Objects"
-              : "Metrics"}
+              : t === "metrics"
+              ? "Metrics"
+              : "Manual Demo"}
           </button>
         ))}
       </div>
@@ -702,6 +805,171 @@ export default function Dashboard() {
               <p>Loading metrics...</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Manual Demo */}
+      {tab === "manual" && (
+        <div>
+          <div className="card" style={{ marginBottom: "1rem" }}>
+            <div className="card-header">
+              <span className="card-title">Video Pipeline Demo</span>
+              {pipelineRunCount > 0 && (
+                <span className="badge badge-known">Run #{pipelineRunCount}</span>
+              )}
+            </div>
+            <p className="meta" style={{ marginBottom: "1rem" }}>
+              Upload a video to process through the full pipeline. On the first run,
+              objects will be identified as unknown and researched. Run it again to
+              see the system recognize them instantly.
+            </p>
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+              <input
+                type="file"
+                accept="video/*"
+                onChange={(e) => setPipelineFile(e.target.files?.[0] || null)}
+                disabled={pipelineRunning}
+                style={{
+                  padding: "0.4rem",
+                  border: "1px solid var(--border)",
+                  borderRadius: "4px",
+                  background: "var(--bg)",
+                  color: "var(--text)",
+                  flex: 1,
+                  minWidth: "200px",
+                }}
+              />
+              <button
+                className="btn btn-primary"
+                onClick={handlePipelineRun}
+                disabled={!pipelineFile || pipelineRunning}
+              >
+                {pipelineRunning
+                  ? "Processing..."
+                  : pipelineRunCount === 0
+                  ? "Run Pipeline"
+                  : "Run Again"}
+              </button>
+              <button
+                className="btn"
+                onClick={handlePipelineReset}
+                disabled={pipelineRunning}
+              >
+                Reset KNN
+              </button>
+            </div>
+          </div>
+
+          {/* Terminal-style log */}
+          <div
+            ref={logRef}
+            className="pipeline-log"
+            style={{
+              background: "#0a0a0a",
+              border: "1px solid var(--border)",
+              borderRadius: "8px",
+              padding: "1rem",
+              fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', monospace",
+              fontSize: "0.82rem",
+              lineHeight: "1.6",
+              maxHeight: "600px",
+              overflowY: "auto",
+              color: "#e0e0e0",
+            }}
+          >
+            {pipelineEvents.length === 0 ? (
+              <div style={{ color: "#555" }}>
+                Upload a video and click &quot;Run Pipeline&quot; to start...
+              </div>
+            ) : (
+              pipelineEvents.map((evt, i) => (
+                <div key={i} style={{ marginBottom: "2px" }}>
+                  {evt.type === "info" && (
+                    <span style={{ color: "#8b9dc3" }}>
+                      {">"} {evt.message}
+                    </span>
+                  )}
+                  {evt.type === "frame" && (
+                    <span style={{ color: "#555" }}>
+                      [{evt.time}s] Frame {evt.frame}: {evt.detections} detection{evt.detections !== 1 ? "s" : ""}{evt.filtered ? `, ${evt.filtered} filtered` : ""}
+                    </span>
+                  )}
+                  {evt.type === "detection" && (
+                    <span
+                      style={{
+                        color:
+                          evt.state === "known"
+                            ? "#4ade80"
+                            : evt.state === "uncertain"
+                            ? "#facc15"
+                            : "#f87171",
+                      }}
+                    >
+                      {"  "}[{evt.state?.toUpperCase()}] {evt.label}{" "}
+                      <span style={{ color: "#777" }}>
+                        (YOLO: {evt.yolo_class}@{evt.yolo_conf}%, {evt.knn_info}, frames: {evt.frames_seen})
+                      </span>
+                    </span>
+                  )}
+                  {evt.type === "persistence" && (
+                    <span style={{ color: "#f59e0b", fontWeight: "bold" }}>
+                      {"  "}⚡ {evt.message}
+                    </span>
+                  )}
+                  {evt.type === "research_start" && (
+                    <span style={{ color: "#a78bfa" }}>
+                      {"  "}🔍 {evt.message}
+                    </span>
+                  )}
+                  {evt.type === "research_complete" && (
+                    <span style={{ color: "#34d399" }}>
+                      {"  "}✓ {evt.message}
+                      {evt.manufacturer && (
+                        <span style={{ color: "#777" }}> — by {evt.manufacturer}</span>
+                      )}
+                      {evt.price && (
+                        <span style={{ color: "#facc15" }}> ({evt.price})</span>
+                      )}
+                      {evt.specs_count ? (
+                        <span style={{ color: "#777" }}>, {evt.specs_count} specs</span>
+                      ) : null}
+                      {evt.has_safety && (
+                        <span style={{ color: "#f87171" }}>, safety info</span>
+                      )}
+                    </span>
+                  )}
+                  {evt.type === "research_low_conf" && (
+                    <span style={{ color: "#facc15" }}>
+                      {"  "}⚠ {evt.message}
+                    </span>
+                  )}
+                  {evt.type === "research_error" && (
+                    <span style={{ color: "#f87171" }}>
+                      {"  "}✗ {evt.message}
+                    </span>
+                  )}
+                  {evt.type === "complete" && (
+                    <span style={{ color: "#4ade80", fontWeight: "bold" }}>
+                      {"\n"}══════════════════════════════════════
+                      {"\n"}{evt.message}
+                      {"\n"}  Labels: {evt.labels} | Embeddings: {evt.embeddings} | Known: {evt.known_count} | Unknown: {evt.unknown_count} | Total queries: {evt.total_queries}
+                      {"\n"}══════════════════════════════════════
+                    </span>
+                  )}
+                  {evt.type === "error" && (
+                    <span style={{ color: "#f87171", fontWeight: "bold" }}>
+                      ERROR: {evt.message}
+                    </span>
+                  )}
+                </div>
+              ))
+            )}
+            {pipelineRunning && (
+              <div style={{ color: "#a78bfa" }}>
+                <span className="pulse">●</span> Processing...
+              </div>
+            )}
+          </div>
         </div>
       )}
 
