@@ -1016,11 +1016,16 @@ async def run_pipeline(video: UploadFile):
         yield _sse({"type": "info", "message": f"Video loaded: {total_frames} frames at {fps:.0f} FPS, sampling every {frame_skip} frames"})
         yield _sse({"type": "info", "message": f"KNN memory: {len(memory.get_all_labels())} labels, {memory.get_memory_count()} embeddings"})
 
-        # Local tracker for this run
-        local_tracker = SimpleTracker(iou_threshold=0.2, max_age=10.0)
+        # Local tracker for this run — use lower iou_threshold because video
+        # frame sampling (every ~0.5s) causes larger bbox shifts between frames
+        local_tracker = SimpleTracker(iou_threshold=0.15, max_age=10.0)
         frame_idx = 0
         processed = 0
         research_queue = []  # Collect research tasks to run after detection pass
+        # For video pipeline, use a lower persistence threshold than live feed.
+        # The .env default (10) is tuned for continuous 2 FPS streaming; for a
+        # short demo video with camera motion, 3 frames is sufficient.
+        pipeline_persistence = 3
 
         prefilter_cfg = {
             "depth_min": 0.08, "depth_max": 0.95,
@@ -1139,7 +1144,7 @@ async def run_pipeline(video: UploadFile):
 
                 # Research trigger
                 now = time.time()
-                if state in ("unknown", "uncertain") and matched_track.frames_seen >= config.perception.persistence_frames:
+                if state in ("unknown", "uncertain") and matched_track.frames_seen >= pipeline_persistence:
                     if now > matched_track.cooldown_until:
                         matched_track.cooldown_until = now + config.perception.cooldown_seconds
 
@@ -1161,7 +1166,7 @@ async def run_pipeline(video: UploadFile):
                             "track_id": matched_track.track_id,
                             "yolo_class": det["yolo_class"],
                             "frames_seen": matched_track.frames_seen,
-                            "message": f"Persistence threshold reached ({matched_track.frames_seen}/{config.perception.persistence_frames}) — research triggered!",
+                            "message": f"Persistence threshold reached ({matched_track.frames_seen}/{pipeline_persistence}) — research triggered!",
                         })
 
                         research_queue.append({
